@@ -2,7 +2,7 @@ from django.db import models
 
 
 class Person(models.Model):
-    first_name = models.CharField(max_length=100)
+    first_name = models.CharField(max_length=100, unique=True)
     last_name = models.CharField(max_length=100)
     birthday = models.DateField()
     defaults = models.TextField()
@@ -29,8 +29,20 @@ class Tag(models.Model):
 
 
 class Thing(models.Model):
-    name = models.CharField(max_length=256)
+    name = models.CharField(max_length=255)
     tags = models.ManyToManyField(Tag)
+
+    @property
+    def capitalized_name_property(self):
+        return self.name
+
+    @capitalized_name_property.setter
+    def capitalized_name_property(self, val):
+        self.name = val.capitalize()
+
+    @property
+    def name_in_all_caps(self):
+        return self.name.upper()
 
 
 class Publisher(models.Model):

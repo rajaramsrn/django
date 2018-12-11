@@ -10,6 +10,7 @@ from django import db
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management import call_command
+from django.core.management.base import SystemCheckError
 from django.test import (
     TestCase, TransactionTestCase, skipUnlessDBFeature, testcases,
 )
@@ -17,7 +18,7 @@ from django.test.runner import DiscoverRunner
 from django.test.testcases import connections_support_transactions
 from django.test.utils import dependency_ordered
 
-from .models import Person
+from .models import B, Person, Through
 
 
 class DependencyOrderingTests(unittest.TestCase):
@@ -150,8 +151,11 @@ class ManageCommandTests(unittest.TestCase):
             call_command('test', 'sites', testrunner='test_runner.NonexistentRunner')
 
 
-class CustomTestRunnerOptionsTests(AdminScriptTestCase):
-
+class CustomTestRunnerOptionsSettingsTests(AdminScriptTestCase):
+    """
+    Custom runners can add command line arguments. The runner is specified
+    through a settings file.
+    """
     def setUp(self):
         settings = {
             'TEST_RUNNER': '\'test_runner.runner.CustomOptionsTestRunner\'',
@@ -185,6 +189,43 @@ class CustomTestRunnerOptionsTests(AdminScriptTestCase):
         out, err = self.run_django_admin(args)
         self.assertNoOutput(err)
         self.assertOutput(out, 'bar:foo:31337')
+
+
+class CustomTestRunnerOptionsCmdlineTests(AdminScriptTestCase):
+    """
+    Custom runners can add command line arguments when the runner is specified
+    using --testrunner.
+    """
+    def setUp(self):
+        self.write_settings('settings.py')
+
+    def tearDown(self):
+        self.remove_settings('settings.py')
+
+    def test_testrunner_option(self):
+        args = [
+            'test', '--testrunner', 'test_runner.runner.CustomOptionsTestRunner',
+            '--option_a=bar', '--option_b=foo', '--option_c=31337'
+        ]
+        out, err = self.run_django_admin(args, 'test_project.settings')
+        self.assertNoOutput(err)
+        self.assertOutput(out, 'bar:foo:31337')
+
+    def test_testrunner_equals(self):
+        args = [
+            'test', '--testrunner=test_runner.runner.CustomOptionsTestRunner',
+            '--option_a=bar', '--option_b=foo', '--option_c=31337'
+        ]
+        out, err = self.run_django_admin(args, 'test_project.settings')
+        self.assertNoOutput(err)
+        self.assertOutput(out, 'bar:foo:31337')
+
+    def test_no_testrunner(self):
+        args = ['test', '--testrunner']
+        out, err = self.run_django_admin(args, 'test_project.settings')
+        self.assertIn('usage', err)
+        self.assertNotIn('Traceback', err)
+        self.assertNoOutput(out)
 
 
 class Ticket17477RegressionTests(AdminScriptTestCase):
@@ -327,26 +368,34 @@ class SetupDatabasesTests(unittest.TestCase):
         )
 
 
+@skipUnlessDBFeature('supports_sequence_reset')
 class AutoIncrementResetTest(TransactionTestCase):
     """
-    Here we test creating the same model two times in different test methods,
-    and check that both times they get "1" as their PK value. That is, we test
-    that AutoField values start from 1 for each transactional test case.
+    Creating the same models in different test methods receive the same PK
+    values since the sequences are reset before each test method.
     """
 
     available_apps = ['test_runner']
 
     reset_sequences = True
 
-    @skipUnlessDBFeature('supports_sequence_reset')
-    def test_autoincrement_reset1(self):
+    def _test(self):
+        # Regular model
         p = Person.objects.create(first_name='Jack', last_name='Smith')
         self.assertEqual(p.pk, 1)
+        # Auto-created many-to-many through model
+        p.friends.add(Person.objects.create(first_name='Jacky', last_name='Smith'))
+        self.assertEqual(p.friends.through.objects.first().pk, 1)
+        # Many-to-many through model
+        b = B.objects.create()
+        t = Through.objects.create(person=p, b=b)
+        self.assertEqual(t.pk, 1)
 
-    @skipUnlessDBFeature('supports_sequence_reset')
+    def test_autoincrement_reset1(self):
+        self._test()
+
     def test_autoincrement_reset2(self):
-        p = Person.objects.create(first_name='Jack', last_name='Smith')
-        self.assertEqual(p.pk, 1)
+        self._test()
 
 
 class EmptyDefaultDatabaseTest(unittest.TestCase):
@@ -359,3 +408,59 @@ class EmptyDefaultDatabaseTest(unittest.TestCase):
         connection = testcases.connections[db.utils.DEFAULT_DB_ALIAS]
         self.assertEqual(connection.settings_dict['ENGINE'], 'django.db.backends.dummy')
         connections_support_transactions()
+
+
+class RunTestsExceptionHandlingTests(unittest.TestCase):
+    def test_run_checks_raises(self):
+        """
+        Teardown functions are run when run_checks() raises SystemCheckError.
+        """
+        with mock.patch('django.test.runner.DiscoverRunner.setup_test_environment'), \
+                mock.patch('django.test.runner.DiscoverRunner.setup_databases'), \
+                mock.patch('django.test.runner.DiscoverRunner.build_suite'), \
+                mock.patch('django.test.runner.DiscoverRunner.run_checks', side_effect=SystemCheckError), \
+                mock.patch('django.test.runner.DiscoverRunner.teardown_databases') as teardown_databases, \
+                mock.patch('django.test.runner.DiscoverRunner.teardown_test_environment') as teardown_test_environment:
+            runner = DiscoverRunner(verbosity=0, interactive=False)
+            with self.assertRaises(SystemCheckError):
+                runner.run_tests(['test_runner_apps.sample.tests_sample.TestDjangoTestCase'])
+            self.assertTrue(teardown_databases.called)
+            self.assertTrue(teardown_test_environment.called)
+
+    def test_run_checks_raises_and_teardown_raises(self):
+        """
+        SystemCheckError is surfaced when run_checks() raises SystemCheckError
+        and teardown databases() raises ValueError.
+        """
+        with mock.patch('django.test.runner.DiscoverRunner.setup_test_environment'), \
+                mock.patch('django.test.runner.DiscoverRunner.setup_databases'), \
+                mock.patch('django.test.runner.DiscoverRunner.build_suite'), \
+                mock.patch('django.test.runner.DiscoverRunner.run_checks', side_effect=SystemCheckError), \
+                mock.patch('django.test.runner.DiscoverRunner.teardown_databases', side_effect=ValueError) \
+                as teardown_databases, \
+                mock.patch('django.test.runner.DiscoverRunner.teardown_test_environment') as teardown_test_environment:
+            runner = DiscoverRunner(verbosity=0, interactive=False)
+            with self.assertRaises(SystemCheckError):
+                runner.run_tests(['test_runner_apps.sample.tests_sample.TestDjangoTestCase'])
+            self.assertTrue(teardown_databases.called)
+            self.assertFalse(teardown_test_environment.called)
+
+    def test_run_checks_passes_and_teardown_raises(self):
+        """
+        Exceptions on teardown are surfaced if no exceptions happen during
+        run_checks().
+        """
+        with mock.patch('django.test.runner.DiscoverRunner.setup_test_environment'), \
+                mock.patch('django.test.runner.DiscoverRunner.setup_databases'), \
+                mock.patch('django.test.runner.DiscoverRunner.build_suite'), \
+                mock.patch('django.test.runner.DiscoverRunner.run_checks'), \
+                mock.patch('django.test.runner.DiscoverRunner.teardown_databases', side_effect=ValueError) \
+                as teardown_databases, \
+                mock.patch('django.test.runner.DiscoverRunner.teardown_test_environment') as teardown_test_environment:
+            runner = DiscoverRunner(verbosity=0, interactive=False)
+            with self.assertRaises(ValueError):
+                # Suppress the output when running TestDjangoTestCase.
+                with mock.patch('sys.stderr'):
+                    runner.run_tests(['test_runner_apps.sample.tests_sample.TestDjangoTestCase'])
+            self.assertTrue(teardown_databases.called)
+            self.assertFalse(teardown_test_environment.called)

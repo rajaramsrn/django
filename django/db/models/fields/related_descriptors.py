@@ -63,8 +63,7 @@ and two directions (forward and reverse) for a total of six combinations.
    ``ReverseManyToManyDescriptor``, use ``ManyToManyDescriptor`` instead.
 """
 
-from operator import attrgetter
-
+from django.core.exceptions import FieldError
 from django.db import connections, router, transaction
 from django.db.models import Q, signals
 from django.db.models.query import QuerySet
@@ -81,26 +80,30 @@ class ForwardManyToOneDescriptor:
         class Child(Model):
             parent = ForeignKey(Parent, related_name='children')
 
-    ``child.parent`` is a ``ForwardManyToOneDescriptor`` instance.
+    ``Child.parent`` is a ``ForwardManyToOneDescriptor`` instance.
     """
 
     def __init__(self, field_with_rel):
         self.field = field_with_rel
-        self.cache_name = self.field.get_cache_name()
 
     @cached_property
     def RelatedObjectDoesNotExist(self):
         # The exception can't be created at initialization time since the
-        # related model might not be resolved yet; `rel.model` might still be
-        # a string model reference.
+        # related model might not be resolved yet; `self.field.model` might
+        # still be a string model reference.
         return type(
             'RelatedObjectDoesNotExist',
-            (self.field.remote_field.model.DoesNotExist, AttributeError),
-            {}
+            (self.field.remote_field.model.DoesNotExist, AttributeError), {
+                '__module__': self.field.model.__module__,
+                '__qualname__': '%s.%s.RelatedObjectDoesNotExist' % (
+                    self.field.model.__qualname__,
+                    self.field.name,
+                ),
+            }
         )
 
     def is_cached(self, instance):
-        return hasattr(instance, self.cache_name)
+        return self.field.is_cached(instance)
 
     def get_queryset(self, **hints):
         return self.field.remote_field.model._base_manager.db_manager(hints=hints).all()
@@ -114,6 +117,7 @@ class ForwardManyToOneDescriptor:
         instance_attr = self.field.get_local_related_value
         instances_dict = {instance_attr(inst): inst for inst in instances}
         related_field = self.field.foreign_related_fields[0]
+        remote_field = self.field.remote_field
 
         # FIXME: This will need to be revisited when we introduce support for
         # composite fields. In the meantime we take this practical approach to
@@ -121,20 +125,19 @@ class ForwardManyToOneDescriptor:
         # (related_name ends with a '+'). Refs #21410.
         # The check for len(...) == 1 is a special case that allows the query
         # to be join-less and smaller. Refs #21760.
-        if self.field.remote_field.is_hidden() or len(self.field.foreign_related_fields) == 1:
-            query = {'%s__in' % related_field.name: set(instance_attr(inst)[0] for inst in instances)}
+        if remote_field.is_hidden() or len(self.field.foreign_related_fields) == 1:
+            query = {'%s__in' % related_field.name: {instance_attr(inst)[0] for inst in instances}}
         else:
             query = {'%s__in' % self.field.related_query_name(): instances}
         queryset = queryset.filter(**query)
 
         # Since we're going to assign directly in the cache,
         # we must manage the reverse relation cache manually.
-        if not self.field.remote_field.multiple:
-            rel_obj_cache_name = self.field.remote_field.get_cache_name()
+        if not remote_field.multiple:
             for rel_obj in queryset:
                 instance = instances_dict[rel_obj_attr(rel_obj)]
-                setattr(rel_obj, rel_obj_cache_name, instance)
-        return queryset, rel_obj_attr, instance_attr, True, self.cache_name
+                remote_field.set_cached_value(rel_obj, instance)
+        return queryset, rel_obj_attr, instance_attr, True, self.field.get_cache_name(), False
 
     def get_object(self, instance):
         qs = self.get_queryset(instance=instance)
@@ -154,23 +157,32 @@ class ForwardManyToOneDescriptor:
         if instance is None:
             return self
 
-        # The related instance is loaded from the database and then cached in
-        # the attribute defined in self.cache_name. It can also be pre-cached
+        # The related instance is loaded from the database and then cached
+        # by the field on the model instance state. It can also be pre-cached
         # by the reverse accessor (ReverseOneToOneDescriptor).
         try:
-            rel_obj = getattr(instance, self.cache_name)
-        except AttributeError:
-            val = self.field.get_local_related_value(instance)
-            if None in val:
-                rel_obj = None
+            rel_obj = self.field.get_cached_value(instance)
+        except KeyError:
+            has_value = None not in self.field.get_local_related_value(instance)
+            ancestor_link = instance._meta.get_ancestor_link(self.field.model) if has_value else None
+            if ancestor_link and ancestor_link.is_cached(instance):
+                # An ancestor link will exist if this field is defined on a
+                # multi-table inheritance parent of the instance's class.
+                ancestor = ancestor_link.get_cached_value(instance)
+                # The value might be cached on an ancestor if the instance
+                # originated from walking down the inheritance chain.
+                rel_obj = self.field.get_cached_value(ancestor, default=None)
             else:
+                rel_obj = None
+            if rel_obj is None and has_value:
                 rel_obj = self.get_object(instance)
+                remote_field = self.field.remote_field
                 # If this is a one-to-one relation, set the reverse accessor
                 # cache on the related object to the current instance to avoid
                 # an extra SQL query if it's accessed later on.
-                if not self.field.remote_field.multiple:
-                    setattr(rel_obj, self.field.remote_field.get_cache_name(), instance)
-            setattr(instance, self.cache_name, rel_obj)
+                if not remote_field.multiple:
+                    remote_field.set_cached_value(rel_obj, instance)
+            self.field.set_cached_value(instance, rel_obj)
 
         if rel_obj is None and not self.field.null:
             raise self.RelatedObjectDoesNotExist(
@@ -202,12 +214,12 @@ class ForwardManyToOneDescriptor:
         elif value is not None:
             if instance._state.db is None:
                 instance._state.db = router.db_for_write(instance.__class__, instance=value)
-            elif value._state.db is None:
+            if value._state.db is None:
                 value._state.db = router.db_for_write(value.__class__, instance=instance)
-            elif value._state.db is not None and instance._state.db is not None:
-                if not router.allow_relation(value, instance):
-                    raise ValueError('Cannot assign "%r": the current database router prevents this relation.' % value)
+            if not router.allow_relation(value, instance):
+                raise ValueError('Cannot assign "%r": the current database router prevents this relation.' % value)
 
+        remote_field = self.field.remote_field
         # If we're setting the value of a OneToOneField to None, we need to clear
         # out the cache on any old related object. Otherwise, deleting the
         # previously-related object will also cause this object to be deleted,
@@ -219,13 +231,13 @@ class ForwardManyToOneDescriptor:
             # populated the cache, then we don't care - we're only accessing
             # the object to invalidate the accessor cache, so there's no
             # need to populate the cache just to expire it again.
-            related = getattr(instance, self.cache_name, None)
+            related = self.field.get_cached_value(instance, default=None)
 
             # If we've got an old related object, we need to clear out its
             # cache. This cache also might not exist if the related object
             # hasn't been accessed yet.
             if related is not None:
-                setattr(related, self.field.remote_field.get_cache_name(), None)
+                remote_field.set_cached_value(related, None)
 
             for lh_field, rh_field in self.field.related_fields:
                 setattr(instance, lh_field.attname, None)
@@ -237,13 +249,21 @@ class ForwardManyToOneDescriptor:
 
         # Set the related instance cache used by __get__ to avoid an SQL query
         # when accessing the attribute we just set.
-        setattr(instance, self.cache_name, value)
+        self.field.set_cached_value(instance, value)
 
         # If this is a one-to-one relation, set the reverse accessor cache on
         # the related object to the current instance to avoid an extra SQL
         # query if it's accessed later on.
-        if value is not None and not self.field.remote_field.multiple:
-            setattr(value, self.field.remote_field.get_cache_name(), instance)
+        if value is not None and not remote_field.multiple:
+            remote_field.set_cached_value(value, instance)
+
+    def __reduce__(self):
+        """
+        Pickling should return the instance attached by self.field on the
+        model, not a new copy of that descriptor. Use getattr() to retrieve
+        the instance directly from the model.
+        """
+        return getattr, (self.field.model, self.field.name)
 
 
 class ForwardOneToOneDescriptor(ForwardManyToOneDescriptor):
@@ -255,7 +275,7 @@ class ForwardOneToOneDescriptor(ForwardManyToOneDescriptor):
         class Restaurant(Model):
             place = OneToOneField(Place, related_name='restaurant')
 
-    ``restaurant.place`` is a ``ForwardOneToOneDescriptor`` instance.
+    ``Restaurant.place`` is a ``ForwardOneToOneDescriptor`` instance.
     """
 
     def get_object(self, instance):
@@ -271,8 +291,27 @@ class ForwardOneToOneDescriptor(ForwardManyToOneDescriptor):
             # on the related model for every deferred field.
             if not any(field in fields for field in deferred):
                 kwargs = {field: getattr(instance, field) for field in fields}
-                return rel_model(**kwargs)
+                obj = rel_model(**kwargs)
+                obj._state.adding = instance._state.adding
+                obj._state.db = instance._state.db
+                return obj
         return super().get_object(instance)
+
+    def __set__(self, instance, value):
+        super().__set__(instance, value)
+        # If the primary key is a link to a parent model and a parent instance
+        # is being set, update the value of the inherited pk(s).
+        if self.field.primary_key and self.field.remote_field.parent_link:
+            opts = instance._meta
+            # Inherited primary key fields from this object's base classes.
+            inherited_pk_fields = [
+                field for field in opts.concrete_fields
+                if field.primary_key and field.remote_field
+            ]
+            for field in inherited_pk_fields:
+                rel_model_pk_name = field.remote_field.model._meta.pk.attname
+                raw_value = getattr(value, rel_model_pk_name) if value is not None else None
+                setattr(instance, rel_model_pk_name, raw_value)
 
 
 class ReverseOneToOneDescriptor:
@@ -285,12 +324,13 @@ class ReverseOneToOneDescriptor:
         class Restaurant(Model):
             place = OneToOneField(Place, related_name='restaurant')
 
-    ``place.restaurant`` is a ``ReverseOneToOneDescriptor`` instance.
+    ``Place.restaurant`` is a ``ReverseOneToOneDescriptor`` instance.
     """
 
     def __init__(self, related):
+        # Following the example above, `related` is an instance of OneToOneRel
+        # which represents the reverse restaurant field (place.restaurant).
         self.related = related
-        self.cache_name = related.get_cache_name()
 
     @cached_property
     def RelatedObjectDoesNotExist(self):
@@ -298,12 +338,17 @@ class ReverseOneToOneDescriptor:
         # consistency with `ForwardManyToOneDescriptor`.
         return type(
             'RelatedObjectDoesNotExist',
-            (self.related.related_model.DoesNotExist, AttributeError),
-            {}
+            (self.related.related_model.DoesNotExist, AttributeError), {
+                '__module__': self.related.model.__module__,
+                '__qualname__': '%s.%s.RelatedObjectDoesNotExist' % (
+                    self.related.model.__qualname__,
+                    self.related.name,
+                )
+            },
         )
 
     def is_cached(self, instance):
-        return hasattr(instance, self.cache_name)
+        return self.related.is_cached(instance)
 
     def get_queryset(self, **hints):
         return self.related.related_model._base_manager.db_manager(hints=hints).all()
@@ -313,22 +358,18 @@ class ReverseOneToOneDescriptor:
             queryset = self.get_queryset()
         queryset._add_hints(instance=instances[0])
 
-        rel_obj_attr = attrgetter(self.related.field.attname)
-
-        def instance_attr(obj):
-            return obj._get_pk_val()
-
+        rel_obj_attr = self.related.field.get_local_related_value
+        instance_attr = self.related.field.get_foreign_related_value
         instances_dict = {instance_attr(inst): inst for inst in instances}
         query = {'%s__in' % self.related.field.name: instances}
         queryset = queryset.filter(**query)
 
         # Since we're going to assign directly in the cache,
         # we must manage the reverse relation cache manually.
-        rel_obj_cache_name = self.related.field.get_cache_name()
         for rel_obj in queryset:
             instance = instances_dict[rel_obj_attr(rel_obj)]
-            setattr(rel_obj, rel_obj_cache_name, instance)
-        return queryset, rel_obj_attr, instance_attr, True, self.cache_name
+            self.related.field.set_cached_value(rel_obj, instance)
+        return queryset, rel_obj_attr, instance_attr, True, self.related.get_cache_name(), False
 
     def __get__(self, instance, cls=None):
         """
@@ -345,13 +386,13 @@ class ReverseOneToOneDescriptor:
         if instance is None:
             return self
 
-        # The related instance is loaded from the database and then cached in
-        # the attribute defined in self.cache_name. It can also be pre-cached
+        # The related instance is loaded from the database and then cached
+        # by the field on the model instance state. It can also be pre-cached
         # by the forward accessor (ForwardManyToOneDescriptor).
         try:
-            rel_obj = getattr(instance, self.cache_name)
-        except AttributeError:
-            related_pk = instance._get_pk_val()
+            rel_obj = self.related.get_cached_value(instance)
+        except KeyError:
+            related_pk = instance.pk
             if related_pk is None:
                 rel_obj = None
             else:
@@ -364,8 +405,8 @@ class ReverseOneToOneDescriptor:
                     # Set the forward accessor cache on the related object to
                     # the current instance to avoid an extra SQL query if it's
                     # accessed later on.
-                    setattr(rel_obj, self.related.field.get_cache_name(), instance)
-            setattr(instance, self.cache_name, rel_obj)
+                    self.related.field.set_cached_value(rel_obj, instance)
+            self.related.set_cached_value(instance, rel_obj)
 
         if rel_obj is None:
             raise self.RelatedObjectDoesNotExist(
@@ -395,12 +436,15 @@ class ReverseOneToOneDescriptor:
 
         if value is None:
             # Update the cached related instance (if any) & clear the cache.
-            try:
-                rel_obj = getattr(instance, self.cache_name)
-            except AttributeError:
-                pass
-            else:
-                delattr(instance, self.cache_name)
+            # Following the example above, this would be the cached
+            # ``restaurant`` instance (if any).
+            rel_obj = self.related.get_cached_value(instance, default=None)
+            if rel_obj is not None:
+                # Remove the ``restaurant`` instance from the ``place``
+                # instance cache.
+                self.related.delete_cached_value(instance)
+                # Set the ``place`` field on the ``restaurant``
+                # instance to None.
                 setattr(rel_obj, self.related.field.name, None)
         elif not isinstance(value, self.related.related_model):
             # An object must be an instance of the related class.
@@ -415,11 +459,10 @@ class ReverseOneToOneDescriptor:
         else:
             if instance._state.db is None:
                 instance._state.db = router.db_for_write(instance.__class__, instance=value)
-            elif value._state.db is None:
+            if value._state.db is None:
                 value._state.db = router.db_for_write(value.__class__, instance=instance)
-            elif value._state.db is not None and instance._state.db is not None:
-                if not router.allow_relation(value, instance):
-                    raise ValueError('Cannot assign "%r": the current database router prevents this relation.' % value)
+            if not router.allow_relation(value, instance):
+                raise ValueError('Cannot assign "%r": the current database router prevents this relation.' % value)
 
             related_pk = tuple(getattr(instance, field.attname) for field in self.related.field.foreign_related_fields)
             # Set the value of the related field to the value of the related object's related field
@@ -428,11 +471,15 @@ class ReverseOneToOneDescriptor:
 
             # Set the related instance cache used by __get__ to avoid an SQL query
             # when accessing the attribute we just set.
-            setattr(instance, self.cache_name, value)
+            self.related.set_cached_value(instance, value)
 
             # Set the forward accessor cache on the related object to the current
             # instance to avoid an extra SQL query if it's accessed later on.
-            setattr(value, self.related.field.get_cache_name(), instance)
+            self.related.field.set_cached_value(value, instance)
+
+    def __reduce__(self):
+        # Same purpose as ForwardManyToOneDescriptor.__reduce__().
+        return getattr, (self.related.model, self.related.name)
 
 
 class ReverseManyToOneDescriptor:
@@ -445,7 +492,7 @@ class ReverseManyToOneDescriptor:
         class Child(Model):
             parent = ForeignKey(Parent, related_name='children')
 
-    ``parent.children`` is a ``ReverseManyToOneDescriptor`` instance.
+    ``Parent.children`` is a ``ReverseManyToOneDescriptor`` instance.
 
     Most of the implementation is delegated to a dynamically defined manager
     class built by ``create_forward_many_to_many_manager()`` defined below.
@@ -530,18 +577,34 @@ def create_reverse_many_to_one_manager(superclass, rel):
                 val = getattr(self.instance, field.attname)
                 if val is None or (val == '' and empty_strings_as_null):
                     return queryset.none()
-            queryset._known_related_objects = {self.field: {self.instance.pk: self.instance}}
+            if self.field.many_to_one:
+                # Guard against field-like objects such as GenericRelation
+                # that abuse create_reverse_many_to_one_manager() with reverse
+                # one-to-many relationships instead and break known related
+                # objects assignment.
+                try:
+                    target_field = self.field.target_field
+                except FieldError:
+                    # The relationship has multiple target fields. Use a tuple
+                    # for related object id.
+                    rel_obj_id = tuple([
+                        getattr(self.instance, target_field.attname)
+                        for target_field in self.field.get_path_info()[-1].target_fields
+                    ])
+                else:
+                    rel_obj_id = getattr(self.instance, target_field.attname)
+                queryset._known_related_objects = {self.field: {rel_obj_id: self.instance}}
             return queryset
 
         def _remove_prefetched_objects(self):
             try:
-                self.instance._prefetched_objects_cache.pop(self.field.related_query_name())
+                self.instance._prefetched_objects_cache.pop(self.field.remote_field.get_cache_name())
             except (AttributeError, KeyError):
                 pass  # nothing to clear from cache
 
         def get_queryset(self):
             try:
-                return self.instance._prefetched_objects_cache[self.field.related_query_name()]
+                return self.instance._prefetched_objects_cache[self.field.remote_field.get_cache_name()]
             except (AttributeError, KeyError):
                 queryset = super().get_queryset()
                 return self._apply_rel_filters(queryset)
@@ -564,8 +627,8 @@ def create_reverse_many_to_one_manager(superclass, rel):
             for rel_obj in queryset:
                 instance = instances_dict[rel_obj_attr(rel_obj)]
                 setattr(rel_obj, self.field.name, instance)
-            cache_name = self.field.related_query_name()
-            return queryset, rel_obj_attr, instance_attr, False, cache_name
+            cache_name = self.field.remote_field.get_cache_name()
+            return queryset, rel_obj_attr, instance_attr, False, cache_name, False
 
         def add(self, *objs, bulk=True):
             self._remove_prefetched_objects()
@@ -662,7 +725,7 @@ def create_reverse_many_to_one_manager(superclass, rel):
                 db = router.db_for_write(self.model, instance=self.instance)
                 with transaction.atomic(using=db, savepoint=False):
                     if clear:
-                        self.clear()
+                        self.clear(bulk=bulk)
                         self.add(*objs, bulk=bulk)
                     else:
                         old_objs = set(self.using(db).all())
@@ -692,7 +755,7 @@ class ManyToManyDescriptor(ReverseManyToOneDescriptor):
         class Pizza(Model):
             toppings = ManyToManyField(Topping, related_name='pizzas')
 
-    ``pizza.toppings`` and ``topping.pizzas`` are ``ManyToManyDescriptor``
+    ``Pizza.toppings`` and ``Topping.pizzas`` are ``ManyToManyDescriptor``
     instances.
 
     Most of the implementation is delegated to a dynamically defined manager
@@ -863,7 +926,35 @@ def create_forward_many_to_many_manager(superclass, rel, reverse):
                 ),
                 False,
                 self.prefetch_cache_name,
+                False,
             )
+
+        @property
+        def constrained_target(self):
+            # If the through relation's target field's foreign integrity is
+            # enforced, the query can be performed solely against the through
+            # table as the INNER JOIN'ing against target table is unnecessary.
+            if not self.target_field.db_constraint:
+                return None
+            db = router.db_for_read(self.through, instance=self.instance)
+            if not connections[db].features.supports_foreign_keys:
+                return None
+            hints = {'instance': self.instance}
+            manager = self.through._base_manager.db_manager(db, hints=hints)
+            filters = {self.source_field_name: self.instance.pk}
+            # Nullable target rows must be excluded as well as they would have
+            # been filtered out from an INNER JOIN.
+            if self.target_field.null:
+                filters['%s__isnull' % self.target_field_name] = False
+            return manager.filter(**filters)
+
+        def exists(self):
+            constrained_target = self.constrained_target
+            return constrained_target.exists() if constrained_target else super().exists()
+
+        def count(self):
+            constrained_target = self.constrained_target
+            return constrained_target.count() if constrained_target else super().count()
 
         def add(self, *objs):
             if not rel.through._meta.auto_created:
@@ -1025,7 +1116,7 @@ def create_forward_many_to_many_manager(superclass, rel, reverse):
                             source_field_name: self.related_val[0],
                             '%s__in' % target_field_name: new_ids,
                         }))
-                new_ids = new_ids - set(vals)
+                new_ids.difference_update(vals)
 
                 with transaction.atomic(using=db, savepoint=False):
                     if self.reverse or source_field_name == self.source_field_name:

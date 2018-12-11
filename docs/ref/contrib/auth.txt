@@ -34,12 +34,12 @@ Fields
 
         .. admonition:: Usernames and Unicode
 
-            Django originally accepted only ASCII letters in usernames.
-            Although it wasn't a deliberate choice, Unicode characters have
-            always been accepted when using Python 3. Django 1.10 officially
-            added Unicode support in usernames, keeping the ASCII-only behavior
-            on Python 2, with the option to customize the behavior using
-            :attr:`.User.username_validator`.
+            Django originally accepted only ASCII letters and numbers in
+            usernames. Although it wasn't a deliberate choice, Unicode
+            characters have always been accepted when using Python 3. Django
+            1.10 officially added Unicode support in usernames, keeping the
+            ASCII-only behavior on Python 2, with the option to customize the
+            behavior using :attr:`.User.username_validator`.
 
     .. attribute:: first_name
 
@@ -50,10 +50,6 @@ Fields
 
         Optional (:attr:`blank=True <django.db.models.Field.blank>`). 150
         characters or fewer.
-
-        .. versionchanged:: 2.0
-
-            The ``max_length`` increased from 30 to 150 characters.
 
     .. attribute:: email
 
@@ -213,6 +209,14 @@ Methods
         Returns ``False`` if
         :meth:`~django.contrib.auth.models.User.set_unusable_password()` has
         been called for this user.
+
+        .. versionchanged:: 2.1
+
+            In older versions, this also returns ``False`` if the password is
+            ``None`` or an empty string, or if the password uses a hasher
+            that's not in the :setting:`PASSWORD_HASHERS` setting. That
+            behavior is considered a bug as it prevents users with such
+            passwords from requesting a password reset.
 
     .. method:: get_group_permissions(obj=None)
 
@@ -378,8 +382,12 @@ Fields
 
     .. attribute:: name
 
-        Required. 80 characters or fewer. Any characters are permitted. Example:
-        ``'Awesome Users'``.
+        Required. 150 characters or fewer. Any characters are permitted.
+        Example: ``'Awesome Users'``.
+
+        .. versionchanged:: 2.2
+
+             The ``max_length`` increased from 80 to 150 characters.
 
     .. attribute:: permissions
 
@@ -395,12 +403,12 @@ Validators
 
 .. class:: validators.ASCIIUsernameValidator
 
-    A field validator allowing only ASCII letters, in addition to ``@``, ``.``,
-    ``+``, ``-``, and ``_``.
+    A field validator allowing only ASCII letters and numbers, in addition to
+    ``@``, ``.``, ``+``, ``-``, and ``_``.
 
 .. class:: validators.UnicodeUsernameValidator
 
-    A field validator allowing Unicode letters, in addition to ``@``, ``.``,
+    A field validator allowing Unicode characters, in addition to ``@``, ``.``,
     ``+``, ``-``, and ``_``. The default validator for ``User.username``.
 
 .. _topics-auth-signals:
@@ -460,10 +468,6 @@ can be used for notification when a user logs in or out.
         The :class:`~django.http.HttpRequest` object, if one was provided to
         :func:`~django.contrib.auth.authenticate`.
 
-    .. versionchanged:: 1.11
-
-        The ``request`` argument was added.
-
 .. _authentication-backends-reference:
 
 Authentication backends
@@ -517,10 +521,6 @@ The following backends are available in :mod:`django.contrib.auth.backends`:
         if it wasn't provided to :func:`~django.contrib.auth.authenticate`
         (which passes it on to the backend).
 
-        .. versionchanged:: 1.11
-
-            The ``request`` argument was added.
-
     .. method:: get_user_permissions(user_obj, obj=None)
 
         Returns the set of permission strings the ``user_obj`` has from their
@@ -553,7 +553,7 @@ The following backends are available in :mod:`django.contrib.auth.backends`:
         Returns whether the ``user_obj`` has any permissions on the app
         ``app_label``.
 
-    .. method:: ModelBackend.user_can_authenticate()
+    .. method:: user_can_authenticate()
 
         Returns whether the user is allowed to authenticate. To match the
         behavior of :class:`~django.contrib.auth.forms.AuthenticationForm`
@@ -586,45 +586,46 @@ The following backends are available in :mod:`django.contrib.auth.backends`:
     If you need more control, you can create your own authentication backend
     that inherits from this class and override these attributes or methods:
 
-.. attribute:: RemoteUserBackend.create_unknown_user
+    .. attribute:: create_unknown_user
 
-    ``True`` or ``False``. Determines whether or not a user object is created
-    if not already in the database  Defaults to ``True``.
+        ``True`` or ``False``. Determines whether or not a user object is
+        created if not already in the database  Defaults to ``True``.
 
-.. method:: RemoteUserBackend.authenticate(request, remote_user)
+    .. method:: authenticate(request, remote_user)
 
-    The username passed as ``remote_user`` is considered trusted. This method
-    simply returns the user object with the given username, creating a new
-    user object if :attr:`~RemoteUserBackend.create_unknown_user` is ``True``.
+        The username passed as ``remote_user`` is considered trusted. This
+        method simply returns the user object with the given username, creating
+        a new user object if :attr:`~RemoteUserBackend.create_unknown_user` is
+        ``True``.
 
-    Returns ``None`` if :attr:`~RemoteUserBackend.create_unknown_user` is
-    ``False`` and a ``User`` object with the given username is not found in the
-    database.
+        Returns ``None`` if :attr:`~RemoteUserBackend.create_unknown_user` is
+        ``False`` and a ``User`` object with the given username is not found in
+        the database.
 
-    ``request`` is an :class:`~django.http.HttpRequest` and may be ``None`` if
-    it wasn't provided to :func:`~django.contrib.auth.authenticate` (which
-    passes it on to the backend).
+        ``request`` is an :class:`~django.http.HttpRequest` and may be ``None``
+        if it wasn't provided to :func:`~django.contrib.auth.authenticate`
+        (which passes it on to the backend).
 
-.. method:: RemoteUserBackend.clean_username(username)
+    .. method:: clean_username(username)
 
-   Performs any cleaning on the ``username`` (e.g. stripping LDAP DN
-   information) prior to using it to get or create a user object. Returns the
-   cleaned username.
+       Performs any cleaning on the ``username`` (e.g. stripping LDAP DN
+       information) prior to using it to get or create a user object. Returns
+       the cleaned username.
 
-.. method:: RemoteUserBackend.configure_user(user)
+    .. method:: configure_user(user)
 
-   Configures a newly created user.  This method is called immediately after a
-   new user is created, and can be used to perform custom setup actions, such
-   as setting the user's groups based on attributes in an LDAP directory.
-   Returns the user object.
+       Configures a newly created user.  This method is called immediately
+       after a new user is created, and can be used to perform custom setup
+       actions, such as setting the user's groups based on attributes in an
+       LDAP directory. Returns the user object.
 
-.. method:: RemoteUserBackend.user_can_authenticate()
+    .. method:: user_can_authenticate()
 
-    Returns whether the user is allowed to authenticate. This method returns
-    ``False`` for users with :attr:`is_active=False
-    <django.contrib.auth.models.User.is_active>`. Custom user models that don't
-    have an :attr:`~django.contrib.auth.models.CustomUser.is_active` field are
-    allowed.
+        Returns whether the user is allowed to authenticate. This method
+        returns ``False`` for users with :attr:`is_active=False
+        <django.contrib.auth.models.User.is_active>`. Custom user models that
+        don't have an :attr:`~django.contrib.auth.models.CustomUser.is_active`
+        field are allowed.
 
 .. class:: AllowAllUsersRemoteUserBackend
 

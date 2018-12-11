@@ -124,7 +124,8 @@ For example, we could look up the
 :class:`~django.contrib.auth.models.User` model::
 
     >>> from django.contrib.contenttypes.models import ContentType
-    >>> ContentType.objects.get(app_label="auth", model="user")
+    >>> user_type = ContentType.objects.get(app_label='auth', model='user')
+    >>> user_type
     <ContentType: user>
 
 And then use it to query for a particular
@@ -241,9 +242,9 @@ generic (sometimes called "polymorphic") relationships between models.
 
 A simple example is a tagging system, which might look like this::
 
-    from django.db import models
     from django.contrib.contenttypes.fields import GenericForeignKey
     from django.contrib.contenttypes.models import ContentType
+    from django.db import models
 
     class TaggedItem(models.Model):
         tag = models.SlugField()
@@ -335,6 +336,13 @@ creating a ``TaggedItem``::
     >>> t.content_object
     <User: Guido>
 
+If the related object is deleted, the ``content_type`` and ``object_id`` fields
+remain set to their original values and the ``GenericForeignKey`` returns
+``None``::
+
+    >>> guido.delete()
+    >>> t.content_object  # returns None
+
 Due to the way :class:`~django.contrib.contenttypes.fields.GenericForeignKey`
 is implemented, you cannot use such fields directly with filters (``filter()``
 and ``exclude()``, for example) via the database API. Because a
@@ -364,8 +372,8 @@ Reverse generic relations
 If you know which models you'll be using most often, you can also add
 a "reverse" generic relationship to enable an additional API. For example::
 
-    from django.db import models
     from django.contrib.contenttypes.fields import GenericRelation
+    from django.db import models
 
     class Bookmark(models.Model):
         url = models.URLField()

@@ -1,6 +1,9 @@
 import copy
+import itertools
 import operator
 from functools import total_ordering, wraps
+
+from django.utils.version import PY36, get_docs_version
 
 
 # You can't trivially replace this with `functools.partial` because this binds
@@ -8,7 +11,7 @@ from functools import total_ordering, wraps
 # CPython) is a type and its instances don't bind.
 def curry(_curried_func, *args, **kwargs):
     def _curried(*moreargs, **morekwargs):
-        return _curried_func(*(args + moreargs), **dict(kwargs, **morekwargs))
+        return _curried_func(*args, *moreargs, **{**kwargs, **morekwargs})
     return _curried
 
 
@@ -17,15 +20,61 @@ class cached_property:
     Decorator that converts a method with a single self argument into a
     property cached on the instance.
 
-    Optional ``name`` argument allows you to make cached properties of other
-    methods. (e.g.  url = cached_property(get_absolute_url, name='url') )
+    A cached property can be made out of an existing method:
+    (e.g. ``url = cached_property(get_absolute_url)``).
+    On Python < 3.6, the optional ``name`` argument must be provided, e.g.
+    ``url = cached_property(get_absolute_url, name='url')``.
     """
+    name = None
+
+    @staticmethod
+    def func(instance):
+        raise TypeError(
+            'Cannot use cached_property instance without calling '
+            '__set_name__() on it.'
+        )
+
+    @staticmethod
+    def _is_mangled(name):
+        return name.startswith('__') and not name.endswith('__')
+
     def __init__(self, func, name=None):
-        self.func = func
+        if PY36:
+            self.real_func = func
+        else:
+            func_name = func.__name__
+            name = name or func_name
+            if not (isinstance(name, str) and name.isidentifier()):
+                raise ValueError(
+                    "%r can't be used as the name of a cached_property." % name,
+                )
+            if self._is_mangled(name):
+                raise ValueError(
+                    'cached_property does not work with mangled methods on '
+                    'Python < 3.6 without the appropriate `name` argument. See '
+                    'https://docs.djangoproject.com/en/%s/ref/utils/'
+                    '#cached-property-mangled-name' % get_docs_version(),
+                )
+            self.name = name
+            self.func = func
         self.__doc__ = getattr(func, '__doc__')
-        self.name = name or func.__name__
+
+    def __set_name__(self, owner, name):
+        if self.name is None:
+            self.name = name
+            self.func = self.real_func
+        elif name != self.name:
+            raise TypeError(
+                "Cannot assign the same cached_property to two different names "
+                "(%r and %r)." % (self.name, name)
+            )
 
     def __get__(self, instance, cls=None):
+        """
+        Call the function and put the return value in instance.__dict__ so that
+        subsequent attribute access on the instance returns the cached value
+        instead of calling cached_property.__get__().
+        """
         if instance is None:
             return self
         res = instance.__dict__[self.name] = self.func(instance)
@@ -77,7 +126,7 @@ def lazy(func, *resultclasses):
         def __prepare_class__(cls):
             for resultclass in resultclasses:
                 for type_ in resultclass.mro():
-                    for method_name in type_.__dict__.keys():
+                    for method_name in type_.__dict__:
                         # All __promise__ return the same wrapper method, they
                         # look up the correct implementation when called.
                         if hasattr(cls, method_name):
@@ -184,12 +233,9 @@ def keep_lazy(*resultclasses):
 
         @wraps(func)
         def wrapper(*args, **kwargs):
-            for arg in list(args) + list(kwargs.values()):
-                if isinstance(arg, Promise):
-                    break
-            else:
-                return func(*args, **kwargs)
-            return lazy_func(*args, **kwargs)
+            if any(isinstance(arg, Promise) for arg in itertools.chain(args, kwargs.values())):
+                return lazy_func(*args, **kwargs)
+            return func(*args, **kwargs)
         return wrapper
     return decorator
 
@@ -272,14 +318,6 @@ class LazyObject:
             self._setup()
         return (unpickle_lazyobject, (self._wrapped,))
 
-    def __getstate__(self):
-        """
-        Prevent older versions of pickle from trying to pickle the __dict__
-        (which in the case of a SimpleLazyObject may contain a lambda). The
-        value will be ignored by __reduce__() and the custom unpickler.
-        """
-        return {}
-
     def __copy__(self):
         if self._wrapped is empty:
             # If uninitialized, copy the wrapper. Use type(self), not
@@ -309,6 +347,8 @@ class LazyObject:
     # care about this (especially in equality tests)
     __class__ = property(new_method_proxy(operator.attrgetter("__class__")))
     __eq__ = new_method_proxy(operator.eq)
+    __lt__ = new_method_proxy(operator.lt)
+    __gt__ = new_method_proxy(operator.gt)
     __ne__ = new_method_proxy(operator.ne)
     __hash__ = new_method_proxy(hash)
 

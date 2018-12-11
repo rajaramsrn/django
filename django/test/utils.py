@@ -7,6 +7,7 @@ import warnings
 from contextlib import contextmanager
 from functools import wraps
 from io import StringIO
+from itertools import chain
 from types import SimpleNamespace
 from unittest import TestCase, skipIf, skipUnless
 from xml.dom.minidom import Node, parseString
@@ -49,9 +50,7 @@ class Approximate:
         return repr(self.val)
 
     def __eq__(self, other):
-        if self.val == other:
-            return True
-        return round(abs(self.val - other), self.places) == 0
+        return self.val == other or round(abs(self.val - other), self.places) == 0
 
 
 class ContextList(list):
@@ -85,11 +84,7 @@ class ContextList(list):
         """
         Flattened keys of subcontexts.
         """
-        keys = set()
-        for subcontext in self:
-            for dict in subcontext:
-                keys |= set(dict.keys())
-        return keys
+        return set(chain.from_iterable(d for subcontext in self for d in subcontext))
 
 
 def instrumented_test_render(self, context):
@@ -125,7 +120,7 @@ def setup_test_environment(debug=None):
 
     saved_data.allowed_hosts = settings.ALLOWED_HOSTS
     # Add the default host of the test client.
-    settings.ALLOWED_HOSTS = list(settings.ALLOWED_HOSTS) + ['testserver']
+    settings.ALLOWED_HOSTS = [*settings.ALLOWED_HOSTS, 'testserver']
 
     saved_data.debug = settings.DEBUG
     settings.DEBUG = debug
@@ -163,7 +158,7 @@ def setup_databases(verbosity, interactive, keepdb=False, debug_sql=False, paral
 
     old_names = []
 
-    for signature, (db_name, aliases) in test_databases.items():
+    for db_name, aliases in test_databases.values():
         first_alias = None
         for alias in aliases:
             connection = connections[alias]
@@ -181,7 +176,7 @@ def setup_databases(verbosity, interactive, keepdb=False, debug_sql=False, paral
                 if parallel > 1:
                     for index in range(parallel):
                         connection.creation.clone_test_db(
-                            number=index + 1,
+                            suffix=str(index + 1),
                             verbosity=verbosity,
                             keepdb=keepdb,
                         )
@@ -295,7 +290,7 @@ def teardown_databases(old_config, verbosity, parallel=0, keepdb=False):
             if parallel > 1:
                 for index in range(parallel):
                     connection.creation.destroy_test_db(
-                        number=index + 1,
+                        suffix=str(index + 1),
                         verbosity=verbosity,
                         keepdb=keepdb,
                     )
@@ -303,9 +298,7 @@ def teardown_databases(old_config, verbosity, parallel=0, keepdb=False):
 
 
 def get_runner(settings, test_runner_class=None):
-    if not test_runner_class:
-        test_runner_class = settings.TEST_RUNNER
-
+    test_runner_class = test_runner_class or settings.TEST_RUNNER
     test_path = test_runner_class.split('.')
     # Allow for relative paths
     if len(test_path) > 1:
@@ -354,7 +347,11 @@ class TestContextDecorator:
                 context = self.enable()
                 if self.attr_name:
                     setattr(inner_self, self.attr_name, context)
-                decorated_setUp(inner_self)
+                try:
+                    decorated_setUp(inner_self)
+                except Exception:
+                    self.disable()
+                    raise
 
             def tearDown(inner_self):
                 decorated_tearDown(inner_self)
@@ -389,6 +386,8 @@ class override_settings(TestContextDecorator):
     with the ``with`` statement. In either event, entering/exiting are called
     before and after, respectively, the function/block is executed.
     """
+    enable_exception = None
+
     def __init__(self, **kwargs):
         self.options = kwargs
         super().__init__()
@@ -408,26 +407,45 @@ class override_settings(TestContextDecorator):
         self.wrapped = settings._wrapped
         settings._wrapped = override
         for key, new_value in self.options.items():
-            setting_changed.send(sender=settings._wrapped.__class__,
-                                 setting=key, value=new_value, enter=True)
+            try:
+                setting_changed.send(
+                    sender=settings._wrapped.__class__,
+                    setting=key, value=new_value, enter=True,
+                )
+            except Exception as exc:
+                self.enable_exception = exc
+                self.disable()
 
     def disable(self):
         if 'INSTALLED_APPS' in self.options:
             apps.unset_installed_apps()
         settings._wrapped = self.wrapped
         del self.wrapped
+        responses = []
         for key in self.options:
             new_value = getattr(settings, key, None)
-            setting_changed.send(sender=settings._wrapped.__class__,
-                                 setting=key, value=new_value, enter=False)
+            responses_for_setting = setting_changed.send_robust(
+                sender=settings._wrapped.__class__,
+                setting=key, value=new_value, enter=False,
+            )
+            responses.extend(responses_for_setting)
+        if self.enable_exception is not None:
+            exc = self.enable_exception
+            self.enable_exception = None
+            raise exc
+        for _, response in responses:
+            if isinstance(response, Exception):
+                raise response
 
     def save_options(self, test_func):
         if test_func._overridden_settings is None:
             test_func._overridden_settings = self.options
         else:
             # Duplicate dict to prevent subclasses from altering their parent.
-            test_func._overridden_settings = dict(
-                test_func._overridden_settings, **self.options)
+            test_func._overridden_settings = {
+                **test_func._overridden_settings,
+                **self.options,
+            }
 
     def decorate_class(self, cls):
         from django.test import SimpleTestCase
@@ -502,10 +520,14 @@ class override_system_checks(TestContextDecorator):
 
     def enable(self):
         self.old_checks = self.registry.registered_checks
-        self.registry.registered_checks = self.new_checks
+        self.registry.registered_checks = set()
+        for check in self.new_checks:
+            self.registry.register(check, *getattr(check, 'tags', ()))
         self.old_deployment_checks = self.registry.deployment_checks
         if self.deployment_checks is not None:
-            self.registry.deployment_checks = self.deployment_checks
+            self.registry.deployment_checks = set()
+            for check in self.deployment_checks:
+                self.registry.register(check, *getattr(check, 'tags', ()), deploy=True)
 
     def disable(self):
         self.registry.registered_checks = self.old_checks
@@ -550,17 +572,13 @@ def compare_xml(want, got):
         got_children = children(got_element)
         if len(want_children) != len(got_children):
             return False
-        for want, got in zip(want_children, got_children):
-            if not check_element(want, got):
-                return False
-        return True
+        return all(check_element(want, got) for want, got in zip(want_children, got_children))
 
     def first_node(document):
         for node in document.childNodes:
             if node.nodeType != Node.COMMENT_NODE:
                 return node
 
-    want, got = strip_quotes(want, got)
     want = want.strip().replace('\\n', '\n')
     got = got.strip().replace('\\n', '\n')
 
@@ -576,25 +594,6 @@ def compare_xml(want, got):
     got_root = first_node(parseString(got))
 
     return check_element(want_root, got_root)
-
-
-def strip_quotes(want, got):
-    """
-    Strip quotes of doctests output values:
-
-    >>> strip_quotes("'foo'")
-    "foo"
-    >>> strip_quotes('"foo"')
-    "foo"
-    """
-    def is_quoted_string(s):
-        s = s.strip()
-        return len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'")
-
-    if is_quoted_string(want) and is_quoted_string(got):
-        want = want.strip()[1:-1]
-        got = got.strip()[1:-1]
-    return want, got
 
 
 def str_prefix(s):
@@ -624,6 +623,9 @@ class CaptureQueriesContext:
     def __enter__(self):
         self.force_debug_cursor = self.connection.force_debug_cursor
         self.connection.force_debug_cursor = True
+        # Run any initialization queries if needed so that they won't be
+        # included as part of the count.
+        self.connection.ensure_connection()
         self.initial_queries = len(self.connection.queries_log)
         self.final_queries = None
         request_started.disconnect(reset_queries)
@@ -659,7 +661,10 @@ class ignore_warnings(TestContextDecorator):
 def patch_logger(logger_name, log_level, log_kwargs=False):
     """
     Context manager that takes a named logger and the logging level
-    and provides a simple mock-like list of messages received
+    and provides a simple mock-like list of messages received.
+
+    Use unittest.assertLogs() if you only need Python 3 support. This
+    private API will be removed after Python 2 EOL in 2020 (#27753).
     """
     calls = []
 
@@ -852,6 +857,24 @@ class isolate_apps(TestContextDecorator):
 def tag(*tags):
     """Decorator to add tags to a test class or method."""
     def decorator(obj):
-        setattr(obj, 'tags', set(tags))
+        if hasattr(obj, 'tags'):
+            obj.tags = obj.tags.union(tags)
+        else:
+            setattr(obj, 'tags', set(tags))
         return obj
     return decorator
+
+
+@contextmanager
+def register_lookup(field, *lookups, lookup_name=None):
+    """
+    Context manager to temporarily register lookups on a model field using
+    lookup_name (or the lookup's lookup_name if not provided).
+    """
+    try:
+        for lookup in lookups:
+            field.register_lookup(lookup, lookup_name)
+        yield
+    finally:
+        for lookup in lookups:
+            field._unregister_lookup(lookup, lookup_name)

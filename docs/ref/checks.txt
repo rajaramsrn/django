@@ -85,6 +85,7 @@ Django's system checks are organized using the following tags:
 * ``signals``: Checks on signal declarations and handler registrations.
 * ``staticfiles``: Checks :mod:`django.contrib.staticfiles` configuration.
 * ``templates``: Checks template related configuration.
+* ``translation``: Checks translation related configuration.
 * ``urls``: Checks URL configuration.
 
 Some checks may be registered with multiple tags.
@@ -95,30 +96,12 @@ Core system checks
 Backwards compatibility
 -----------------------
 
-The following checks are performed to warn the user of any potential problems
-that might occur as a result of a version upgrade.
+Compatibility checks warn of potential problems that might occur after
+upgrading Django.
 
-* **1_6.W001**: Some project unit tests may not execute as expected. *This
-  check was removed in Django 1.8 due to false positives*.
-* **1_6.W002**: ``BooleanField`` does not have a default value. *This
-  check was removed in Django 1.8 due to false positives*.
-* **1_7.W001**:  Django 1.7 changed the global defaults for the
-  ``MIDDLEWARE_CLASSES.``
-  ``django.contrib.sessions.middleware.SessionMiddleware``,
-  ``django.contrib.auth.middleware.AuthenticationMiddleware``, and
-  ``django.contrib.messages.middleware.MessageMiddleware`` were removed from
-  the defaults. If your project needs these middleware then you should
-  configure this setting. *This check was removed in Django 1.9*.
-* **1_8.W001**: The standalone ``TEMPLATE_*`` settings were deprecated in
-  Django 1.8 and the :setting:`TEMPLATES` dictionary takes precedence. You must
-  put the values of the following settings into your defaults ``TEMPLATES``
-  dict: ``TEMPLATE_DIRS``, ``TEMPLATE_CONTEXT_PROCESSORS``, ``TEMPLATE_DEBUG``,
-  ``TEMPLATE_LOADERS``, ``TEMPLATE_STRING_IF_INVALID``. *This check was removed
-  in Django 2.0*.
-* **1_10.W001**: The ``MIDDLEWARE_CLASSES`` setting is deprecated in Django
-  1.10  and the :setting:`MIDDLEWARE` setting takes precedence. Since you've
-  set ``MIDDLEWARE``, the value of ``MIDDLEWARE_CLASSES`` is ignored. *This
-  check was removed in Django 2.0*.
+* **2_0.W001**: Your URL pattern ``<pattern>`` has a ``route`` that contains
+  ``(?P<``, begins with a ``^``, or ends with a ``$``. This was likely an
+  oversight when migrating from ``url()`` to :func:`~django.urls.path`.
 
 Caches
 ------
@@ -156,10 +139,12 @@ Model fields
 * **fields.E007**: Primary keys must not have ``null=True``.
 * **fields.E008**: All ``validators`` must be callable.
 * **fields.E100**: ``AutoField``\s must set primary_key=True.
-* **fields.E110**: ``BooleanField``\s do not accept null values.
+* **fields.E110**: ``BooleanField``\s do not accept null values. *This check
+  appeared before support for null values was added in Django 2.1.*
 * **fields.E120**: ``CharField``\s must define a ``max_length`` attribute.
 * **fields.E121**: ``max_length`` must be a positive integer.
-* **fields.W122**: ``max_length`` is ignored when used with ``IntegerField``.
+* **fields.W122**: ``max_length`` is ignored when used with
+  ``<integer field type>``.
 * **fields.E130**: ``DecimalField``\s must define a ``decimal_places`` attribute.
 * **fields.E131**: ``decimal_places`` must be a non-negative integer.
 * **fields.E132**: ``DecimalField``\s must define a ``max_digits`` attribute.
@@ -172,6 +157,8 @@ Model fields
 * **fields.E160**: The options ``auto_now``, ``auto_now_add``, and ``default``
   are mutually exclusive. Only one of these options may be present.
 * **fields.W161**: Fixed default value provided.
+* **fields.W162**: ``<database>`` does not support a database index on
+  ``<field data type>`` columns.
 * **fields.E900**: ``IPAddressField`` has been removed except for support in
   historical migrations.
 * **fields.W900**: ``IPAddressField`` has been deprecated. Support for it
@@ -182,6 +169,8 @@ Model fields
   check appeared in Django 1.10 and 1.11*.
 * **fields.E901**: ``CommaSeparatedIntegerField`` is removed except for support
   in historical migrations.
+* **fields.W902**: ``FloatRangeField`` is deprecated and will be removed in
+  Django 3.1.
 
 File fields
 ~~~~~~~~~~~
@@ -267,8 +256,8 @@ Models
 * **models.E001**: ``<swappable>`` is not of the form ``app_label.app_name``.
 * **models.E002**: ``<SETTING>`` references ``<model>``, which has not been
   installed, or is abstract.
-* **models.E003**: The model has two many-to-many relations through the
-  intermediate model ``<app_label>.<model>``.
+* **models.E003**: The model has two identical many-to-many relations through
+  the intermediate model ``<app_label>.<model>``.
 * **models.E004**: ``id`` can only be used as a field name if the field also
   sets ``primary_key=True``.
 * **models.E005**: The field ``<field name>`` from parent model ``<model>``
@@ -281,16 +270,16 @@ Models
 * **models.E009**: All ``index_together`` elements must be lists or tuples.
 * **models.E010**: ``unique_together`` must be a list or tuple.
 * **models.E011**: All ``unique_together`` elements must be lists or tuples.
-* **models.E012**: ``index_together/unique_together`` refers to the
+* **models.E012**: ``indexes/index_together/unique_together`` refers to the
   nonexistent field ``<field name>``.
-* **models.E013**: ``index_together/unique_together`` refers to a
+* **models.E013**: ``indexes/index_together/unique_together`` refers to a
   ``ManyToManyField`` ``<field name>``, but ``ManyToManyField``\s are not
   supported for that option.
 * **models.E014**: ``ordering`` must be a tuple or list (even if you want to
   order by only one field).
 * **models.E015**: ``ordering`` refers to the nonexistent field
   ``<field name>``.
-* **models.E016**: ``index_together/unique_together`` refers to field
+* **models.E016**: ``indexes/index_together/unique_together`` refers to field
   ``<field_name>`` which is not local to model ``<model>``.
 * **models.E017**: Proxy model ``<model>`` contains model fields.
 * **models.E018**: Autogenerated column name too long for field ``<field>``.
@@ -308,6 +297,11 @@ Models
   underscore as it collides with the query lookup syntax.
 * **models.E024**: The model name ``<model>`` cannot contain double underscores
   as it collides with the query lookup syntax.
+* **models.E025**: The property ``<property name>`` clashes with a related
+  field accessor.
+* **models.E026**: The model cannot have more than one field with
+  ``primary_key=True``.
+* **models.W027**: ``<database>`` does not support check constraints.
 
 Security
 --------
@@ -354,11 +348,11 @@ The following checks are run if you use the :option:`check --deploy` option:
   your domain should be served exclusively via SSL.
 * **security.W006**: Your :setting:`SECURE_CONTENT_TYPE_NOSNIFF` setting is not
   set to ``True``, so your pages will not be served with an
-  ``'x-content-type-options: nosniff'`` header. You should consider enabling
+  ``'X-Content-Type-Options: nosniff'`` header. You should consider enabling
   this header to prevent the browser from identifying content types incorrectly.
 * **security.W007**: Your :setting:`SECURE_BROWSER_XSS_FILTER` setting is not
   set to ``True``, so your pages will not be served with an
-  ``'x-xss-protection: 1; mode=block'`` header. You should consider enabling
+  ``'X-XSS-Protection: 1; mode=block'`` header. You should consider enabling
   this header to activate the browser's XSS filtering and help prevent XSS
   attacks.
 * **security.W008**: Your :setting:`SECURE_SSL_REDIRECT` setting is not set to
@@ -436,28 +430,38 @@ configured:
   :setting:`OPTIONS <TEMPLATES-OPTIONS>` must be a string but got: ``{value}``
   (``{type}``).
 
+Translation
+-----------
+
+The following checks are performed on your translation configuration:
+
+* **translation.E001**: You have provided an invalid value for the
+  :setting:`LANGUAGE_CODE` setting.
+
 URLs
 ----
 
 The following checks are performed on your URL configuration:
 
 * **urls.W001**: Your URL pattern ``<pattern>`` uses
-  :func:`~django.conf.urls.include` with a ``regex`` ending with a
-  ``$``. Remove the dollar from the ``regex`` to avoid problems
-  including URLs.
-* **urls.W002**: Your URL pattern ``<pattern>`` has a ``regex``
-  beginning with a ``/``. Remove this slash as it is unnecessary.
-  If this pattern is targeted in an :func:`~django.conf.urls.include`, ensure
-  the :func:`~django.conf.urls.include` pattern has a trailing ``/``.
+  :func:`~django.urls.include` with a ``route`` ending with a ``$``. Remove the
+  dollar from the ``route`` to avoid problems including URLs.
+* **urls.W002**: Your URL pattern ``<pattern>`` has a ``route`` beginning with
+  a ``/``. Remove this slash as it is unnecessary. If this pattern is targeted
+  in an :func:`~django.urls.include`, ensure the :func:`~django.urls.include`
+  pattern has a trailing ``/``.
 * **urls.W003**: Your URL pattern ``<pattern>`` has a ``name``
   including a ``:``. Remove the colon, to avoid ambiguous namespace
   references.
 * **urls.E004**: Your URL pattern ``<pattern>`` is invalid. Ensure that
-  ``urlpatterns`` is a list of :func:`~django.conf.urls.url()` instances.
+  ``urlpatterns`` is a list of :func:`~django.urls.path` and/or
+  :func:`~django.urls.re_path` instances.
 * **urls.W005**: URL namespace ``<namespace>`` isn't unique. You may not be
   able to reverse all URLs in this namespace.
 * **urls.E006**: The :setting:`MEDIA_URL`/ :setting:`STATIC_URL` setting must
   end with a slash.
+* **urls.E007**: The custom ``handlerXXX`` view ``'path.to.view'`` does not
+  take the correct number of arguments (…).
 
 ``contrib`` app checks
 ======================
@@ -525,6 +529,15 @@ with the admin site:
 * **admin.E034**: The value of ``readonly_fields`` must be a list or tuple.
 * **admin.E035**: The value of ``readonly_fields[n]`` is not a callable, an
   attribute of ``<ModelAdmin class>``, or an attribute of ``<model>``.
+* **admin.E036**: The value of ``autocomplete_fields`` must be a list or tuple.
+* **admin.E037**: The value of ``autocomplete_fields[n]`` refers to
+  ``<field name>``, which is not an attribute of ``<model>``.
+* **admin.E038**: The value of ``autocomplete_fields[n]`` must be a foreign
+  key or a many-to-many field.
+* **admin.E039**: An admin for model ``<model>`` has to be registered to be
+  referenced by ``<modeladmin>.autocomplete_fields``.
+* **admin.E040**: ``<modeladmin>`` must define ``search_fields``, because
+  it's referenced by ``<other_modeladmin>.autocomplete_fields``.
 
 ``ModelAdmin``
 ~~~~~~~~~~~~~~
@@ -581,6 +594,10 @@ with the admin site:
   which does not refer to a Field.
 * **admin.E128**: The value of ``date_hierarchy`` must be a ``DateField`` or
   ``DateTimeField``.
+* **admin.E129**: ``<modeladmin>`` must define a ``has_<foo>_permission()``
+  method for the ``<action>`` action.
+* **admin.E130**: ``__name__`` attributes of actions defined in
+  ``<modeladmin>`` must be unique.
 
 ``InlineModelAdmin``
 ~~~~~~~~~~~~~~~~~~~~
@@ -623,7 +640,26 @@ The following checks are performed on the default
 * **admin.E401**: :mod:`django.contrib.contenttypes` must be in
   :setting:`INSTALLED_APPS` in order to use the admin application.
 * **admin.E402**: :mod:`django.contrib.auth.context_processors.auth`
-  must be in :setting:`TEMPLATES` in order to use the admin application.
+  must be enabled in :class:`~django.template.backends.django.DjangoTemplates`
+  (:setting:`TEMPLATES`) if using the default auth backend in order to use the
+  admin application.
+* **admin.E403**: A :class:`django.template.backends.django.DjangoTemplates`
+  instance must be configured in :setting:`TEMPLATES` in order to use the
+  admin application.
+* **admin.E404**: ``django.contrib.messages.context_processors.messages``
+  must be enabled in :class:`~django.template.backends.django.DjangoTemplates`
+  (:setting:`TEMPLATES`) in order to use the admin application.
+* **admin.E405**: :mod:`django.contrib.auth` must be in
+  :setting:`INSTALLED_APPS` in order to use the admin application.
+* **admin.E406**: :mod:`django.contrib.messages` must be in
+  :setting:`INSTALLED_APPS` in order to use the admin application.
+* **admin.E407**: :mod:`django.contrib.sessions` must be in
+  :setting:`INSTALLED_APPS` in order to use the admin application.
+* **admin.E408**:
+  :class:`django.contrib.auth.middleware.AuthenticationMiddleware` must be in
+  :setting:`MIDDLEWARE` in order to use the admin application.
+* **admin.E409**: :class:`django.contrib.messages.middleware.MessageMiddleware`
+  must be in :setting:`MIDDLEWARE` in order to use the admin application.
 
 ``auth``
 --------
@@ -666,6 +702,18 @@ The following checks are performed when a model contains a
 * **contenttypes.E003**: ``<field>`` is not a ``ForeignKey``.
 * **contenttypes.E004**: ``<field>`` is not a ``ForeignKey`` to
   ``contenttypes.ContentType``.
+* **contenttypes.E005**: Model names must be at most 100 characters.
+
+``postgres``
+------------
+
+The following checks are performed on :mod:`django.contrib.postgres` model
+fields:
+
+* **postgres.E001**: Base field for array has errors: ...
+* **postgres.E002**: Base field for array cannot be a related field.
+* **postgres.E003**: ``<field>`` default should be a callable instead of an
+  instance so that it's not shared between all field instances.
 
 ``sites``
 ---------
@@ -688,3 +736,5 @@ configured:
   or list.
 * **staticfiles.E002**: The :setting:`STATICFILES_DIRS` setting should not
   contain the :setting:`STATIC_ROOT` setting.
+* **staticfiles.E003**: The prefix ``<prefix>`` in the
+  :setting:`STATICFILES_DIRS` setting must not end with a slash.

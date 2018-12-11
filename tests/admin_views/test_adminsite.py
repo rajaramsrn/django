@@ -1,7 +1,8 @@
 from django.conf.urls import url
 from django.contrib import admin
+from django.contrib.admin.actions import delete_selected
 from django.contrib.auth.models import User
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.client import RequestFactory
 from django.urls import reverse
 
@@ -22,13 +23,14 @@ class SiteEachContextTest(TestCase):
     Check each_context contains the documented variables and that available_apps context
     variable structure is the expected one.
     """
+    request_factory = RequestFactory()
+
     @classmethod
     def setUpTestData(cls):
         cls.u1 = User.objects.create_superuser(username='super', password='secret', email='super@example.com')
 
     def setUp(self):
-        factory = RequestFactory()
-        request = factory.get(reverse('test_adminsite:index'))
+        request = self.request_factory.get(reverse('test_adminsite:index'))
         request.user = self.u1
         self.ctx = site.each_context(request)
 
@@ -40,7 +42,7 @@ class SiteEachContextTest(TestCase):
         self.assertIs(ctx['has_permission'], True)
 
     def test_each_context_site_url_with_script_name(self):
-        request = RequestFactory().get(reverse('test_adminsite:index'), SCRIPT_NAME='/my-script-name/')
+        request = self.request_factory.get(reverse('test_adminsite:index'), SCRIPT_NAME='/my-script-name/')
         request.user = self.u1
         self.assertEqual(site.each_context(request)['site_url'], '/my-script-name/')
 
@@ -73,3 +75,28 @@ class SiteEachContextTest(TestCase):
         self.assertEqual(user['admin_url'], '/test_admin/admin/auth/user/')
         self.assertEqual(user['add_url'], '/test_admin/admin/auth/user/add/')
         self.assertEqual(user['name'], 'Users')
+
+
+class SiteActionsTests(SimpleTestCase):
+    def setUp(self):
+        self.site = admin.AdminSite()
+
+    def test_add_action(self):
+        def test_action():
+            pass
+        self.site.add_action(test_action)
+        self.assertEqual(self.site.get_action('test_action'), test_action)
+
+    def test_disable_action(self):
+        action_name = 'delete_selected'
+        self.assertEqual(self.site._actions[action_name], delete_selected)
+        self.site.disable_action(action_name)
+        with self.assertRaises(KeyError):
+            self.site._actions[action_name]
+
+    def test_get_action(self):
+        """AdminSite.get_action() returns an action even if it's disabled."""
+        action_name = 'delete_selected'
+        self.assertEqual(self.site.get_action(action_name), delete_selected)
+        self.site.disable_action(action_name)
+        self.assertEqual(self.site.get_action(action_name), delete_selected)

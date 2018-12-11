@@ -5,7 +5,6 @@ import functools
 import math
 import os
 import re
-import sys
 import uuid
 from unittest import mock
 
@@ -20,15 +19,13 @@ from django.db.migrations.writer import (
     MigrationWriter, OperationWriter, SettingsReference,
 )
 from django.test import SimpleTestCase
-from django.utils import datetime_safe
 from django.utils.deconstruct import deconstructible
 from django.utils.functional import SimpleLazyObject
-from django.utils.timezone import FixedOffset, get_default_timezone, utc
+from django.utils.timezone import get_default_timezone, get_fixed_timezone, utc
 from django.utils.translation import gettext_lazy as _
+from django.utils.version import PY36
 
 from .models import FoodManager, FoodQuerySet
-
-PY36 = sys.version_info >= (3, 6)
 
 
 class Money(decimal.Decimal):
@@ -40,7 +37,7 @@ class Money(decimal.Decimal):
         )
 
 
-class TestModel1(object):
+class TestModel1:
     def upload_to(self):
         return '/somewhere/dynamic/'
     thing = models.FileField(upload_to=upload_to)
@@ -353,7 +350,7 @@ class WriterTests(SimpleTestCase):
         self.assertSerializedEqual(datetime.date.today)
         self.assertSerializedEqual(datetime.datetime.now().time())
         self.assertSerializedEqual(datetime.datetime(2014, 1, 1, 1, 1, tzinfo=get_default_timezone()))
-        self.assertSerializedEqual(datetime.datetime(2013, 12, 31, 22, 1, tzinfo=FixedOffset(180)))
+        self.assertSerializedEqual(datetime.datetime(2013, 12, 31, 22, 1, tzinfo=get_fixed_timezone(180)))
         self.assertSerializedResultEqual(
             datetime.datetime(2014, 1, 1, 1, 1),
             ("datetime.datetime(2014, 1, 1, 1, 1)", {'import datetime'})
@@ -364,20 +361,6 @@ class WriterTests(SimpleTestCase):
                 "datetime.datetime(2012, 1, 1, 1, 1, tzinfo=utc)",
                 {'import datetime', 'from django.utils.timezone import utc'},
             )
-        )
-
-    def test_serialize_datetime_safe(self):
-        self.assertSerializedResultEqual(
-            datetime_safe.date(2014, 3, 31),
-            ("datetime.date(2014, 3, 31)", {'import datetime'})
-        )
-        self.assertSerializedResultEqual(
-            datetime_safe.time(10, 25),
-            ("datetime.time(10, 25)", {'import datetime'})
-        )
-        self.assertSerializedResultEqual(
-            datetime_safe.datetime(2014, 3, 31, 16, 4, 31),
-            ("datetime.datetime(2014, 3, 31, 16, 4, 31)", {'import datetime'})
         )
 
     def test_serialize_fields(self):
@@ -505,6 +488,12 @@ class WriterTests(SimpleTestCase):
         self.assertSerializedEqual(frozenset())
         self.assertSerializedEqual(frozenset("let it go"))
 
+    def test_serialize_set(self):
+        self.assertSerializedEqual(set())
+        self.assertSerializedResultEqual(set(), ('set()', set()))
+        self.assertSerializedEqual({'a'})
+        self.assertSerializedResultEqual({'a'}, ("{'a'}", set()))
+
     def test_serialize_timedelta(self):
         self.assertSerializedEqual(datetime.timedelta())
         self.assertSerializedEqual(datetime.timedelta(minutes=42))
@@ -515,6 +504,17 @@ class WriterTests(SimpleTestCase):
         self.assertEqual(result.func, value.func)
         self.assertEqual(result.args, value.args)
         self.assertEqual(result.keywords, value.keywords)
+
+    def test_serialize_functools_partialmethod(self):
+        value = functools.partialmethod(datetime.timedelta, 1, seconds=2)
+        result = self.serialize_round_trip(value)
+        self.assertIsInstance(result, functools.partialmethod)
+        self.assertEqual(result.func, value.func)
+        self.assertEqual(result.args, value.args)
+        self.assertEqual(result.keywords, value.keywords)
+
+    def test_serialize_type_none(self):
+        self.assertSerializedEqual(type(None))
 
     def test_simple_migration(self):
         """

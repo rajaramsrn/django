@@ -124,6 +124,11 @@ class Apps:
     def check_apps_ready(self):
         """Raise an exception if all apps haven't been imported yet."""
         if not self.apps_ready:
+            from django.conf import settings
+            # If "not ready" is due to unconfigured settings, accessing
+            # INSTALLED_APPS raises a more helpful ImproperlyConfigured
+            # exception.
+            settings.INSTALLED_APPS
             raise AppRegistryNotReady("Apps aren't loaded yet.")
 
     def check_models_ready(self):
@@ -171,7 +176,7 @@ class Apps:
 
         result = []
         for app_config in self.app_configs.values():
-            result.extend(list(app_config.get_models(include_auto_created, include_swapped)))
+            result.extend(app_config.get_models(include_auto_created, include_swapped))
         return result
 
     def get_model(self, app_label, model_name=None, require_ready=True):
@@ -300,7 +305,7 @@ class Apps:
         This method is safe in the sense that it doesn't trigger any imports.
         """
         available = set(available)
-        installed = set(app_config.name for app_config in self.get_app_configs())
+        installed = {app_config.name for app_config in self.get_app_configs()}
         if not available.issubset(installed):
             raise ValueError(
                 "Available apps isn't a subset of installed apps, extra apps: %s"
@@ -384,7 +389,7 @@ class Apps:
         # to lazy_model_operation() along with the remaining model args and
         # repeat until all models are loaded and all arguments are applied.
         else:
-            next_model, more_models = model_keys[0], model_keys[1:]
+            next_model, *more_models = model_keys
 
             # This will be executed after the class corresponding to next_model
             # has been imported and registered. The `func` attribute provides

@@ -1,6 +1,5 @@
 from django.db.models import Field, FloatField
 from django.db.models.expressions import CombinedExpression, Func, Value
-from django.db.models.functions import Coalesce
 from django.db.models.lookups import Lookup
 
 
@@ -36,7 +35,7 @@ class SearchQueryField(Field):
 class SearchVectorCombinable:
     ADD = '||'
 
-    def _combine(self, other, connector, reversed, node=None):
+    def _combine(self, other, connector, reversed):
         if not isinstance(other, SearchVectorCombinable) or not self.config == other.config:
             raise TypeError('SearchVector can only be combined with other SearchVectors')
         if reversed:
@@ -46,15 +45,13 @@ class SearchVectorCombinable:
 
 class SearchVector(SearchVectorCombinable, Func):
     function = 'to_tsvector'
-    arg_joiner = " || ' ' || "
-    _output_field = SearchVectorField()
+    arg_joiner = ", ' ',"
+    template = '%(function)s(concat(%(expressions)s))'
+    output_field = SearchVectorField()
     config = None
 
     def __init__(self, *expressions, **extra):
         super().__init__(*expressions, **extra)
-        self.source_expressions = [
-            Coalesce(expression, Value('')) for expression in self.source_expressions
-        ]
         self.config = self.extra.get('config', self.config)
         weight = self.extra.get('weight')
         if weight is not None and not hasattr(weight, 'resolve_expression'):
@@ -75,7 +72,7 @@ class SearchVector(SearchVectorCombinable, Func):
         if template is None:
             if self.config:
                 config_sql, config_params = compiler.compile(self.config)
-                template = "%(function)s({}::regconfig, %(expressions)s)".format(config_sql.replace('%', '%%'))
+                template = "%(function)s({}::regconfig, concat(%(expressions)s))".format(config_sql.replace('%', '%%'))
             else:
                 template = self.template
         sql, params = super().as_sql(compiler, connection, function=function, template=template)
@@ -96,14 +93,12 @@ class SearchQueryCombinable:
     BITAND = '&&'
     BITOR = '||'
 
-    def _combine(self, other, connector, reversed, node=None):
+    def _combine(self, other, connector, reversed):
         if not isinstance(other, SearchQueryCombinable):
             raise TypeError(
                 'SearchQuery can only be combined with other SearchQuerys, '
                 'got {}.'.format(type(other))
             )
-        if not self.config == other.config:
-            raise TypeError("SearchQuery configs don't match.")
         if reversed:
             return CombinedSearchQuery(other, connector, self, self.config)
         return CombinedSearchQuery(self, connector, other, self.config)
@@ -125,11 +120,19 @@ class SearchQueryCombinable:
 
 
 class SearchQuery(SearchQueryCombinable, Value):
-    _output_field = SearchQueryField()
+    output_field = SearchQueryField()
+    SEARCH_TYPES = {
+        'plain': 'plainto_tsquery',
+        'phrase': 'phraseto_tsquery',
+        'raw': 'to_tsquery',
+    }
 
-    def __init__(self, value, output_field=None, *, config=None, invert=False):
+    def __init__(self, value, output_field=None, *, config=None, invert=False, search_type='plain'):
         self.config = config
         self.invert = invert
+        if search_type not in self.SEARCH_TYPES:
+            raise ValueError("Unknown search_type argument '%s'." % search_type)
+        self.search_type = search_type
         super().__init__(value, output_field=output_field)
 
     def resolve_expression(self, query=None, allow_joins=True, reuse=None, summarize=False, for_save=False):
@@ -143,23 +146,28 @@ class SearchQuery(SearchQueryCombinable, Value):
 
     def as_sql(self, compiler, connection):
         params = [self.value]
+        function = self.SEARCH_TYPES[self.search_type]
         if self.config:
             config_sql, config_params = compiler.compile(self.config)
-            template = 'plainto_tsquery({}::regconfig, %s)'.format(config_sql)
+            template = '{}({}::regconfig, %s)'.format(function, config_sql)
             params = config_params + [self.value]
         else:
-            template = 'plainto_tsquery(%s)'
+            template = '{}(%s)'.format(function)
         if self.invert:
             template = '!!({})'.format(template)
         return template, params
 
-    def _combine(self, other, connector, reversed, node=None):
-        combined = super()._combine(other, connector, reversed, node)
+    def _combine(self, other, connector, reversed):
+        combined = super()._combine(other, connector, reversed)
         combined.output_field = SearchQueryField()
         return combined
 
     def __invert__(self):
         return type(self)(self.value, config=self.config, invert=not self.invert)
+
+    def __str__(self):
+        result = super().__str__()
+        return ('~%s' % result) if self.invert else result
 
 
 class CombinedSearchQuery(SearchQueryCombinable, CombinedExpression):
@@ -167,10 +175,13 @@ class CombinedSearchQuery(SearchQueryCombinable, CombinedExpression):
         self.config = config
         super().__init__(lhs, connector, rhs, output_field)
 
+    def __str__(self):
+        return '(%s)' % super().__str__()
+
 
 class SearchRank(Func):
     function = 'ts_rank'
-    _output_field = FloatField()
+    output_field = FloatField()
 
     def __init__(self, vector, query, **extra):
         if not hasattr(vector, 'resolve_expression'):
@@ -202,10 +213,12 @@ SearchVectorField.register_lookup(SearchVectorExact)
 
 
 class TrigramBase(Func):
+    output_field = FloatField()
+
     def __init__(self, expression, string, **extra):
         if not hasattr(string, 'resolve_expression'):
             string = Value(string)
-        super().__init__(expression, string, output_field=FloatField(), **extra)
+        super().__init__(expression, string, **extra)
 
 
 class TrigramSimilarity(TrigramBase):

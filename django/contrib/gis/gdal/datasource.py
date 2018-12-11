@@ -37,14 +37,14 @@ from ctypes import byref
 
 from django.contrib.gis.gdal.base import GDALBase
 from django.contrib.gis.gdal.driver import Driver
-from django.contrib.gis.gdal.error import GDALException, OGRIndexError
+from django.contrib.gis.gdal.error import GDALException
 from django.contrib.gis.gdal.layer import Layer
 from django.contrib.gis.gdal.prototypes import ds as capi
 from django.utils.encoding import force_bytes, force_text
 
 
 # For more information, see the OGR C API source code:
-#  http://www.gdal.org/ogr__api_8h.html
+#  https://www.gdal.org/ogr__api_8h.html
 #
 # The OGR_DS_* routines are relevant here.
 class DataSource(GDALBase):
@@ -57,7 +57,7 @@ class DataSource(GDALBase):
             self._write = 1
         else:
             self._write = 0
-        # See also http://trac.osgeo.org/gdal/wiki/rfc23_ogr_unicode
+        # See also https://trac.osgeo.org/gdal/wiki/rfc23_ogr_unicode
         self.encoding = encoding
 
         Driver.ensure_registered()
@@ -84,21 +84,18 @@ class DataSource(GDALBase):
             # Raise an exception if the returned pointer is NULL
             raise GDALException('Invalid data source file "%s"' % ds_input)
 
-    def __iter__(self):
-        "Allows for iteration over the layers in a data source."
-        for i in range(self.layer_count):
-            yield self[i]
-
     def __getitem__(self, index):
         "Allows use of the index [] operator to get a layer at the index."
         if isinstance(index, str):
-            layer = capi.get_layer_by_name(self.ptr, force_bytes(index))
-            if not layer:
-                raise OGRIndexError('invalid OGR Layer name given: "%s"' % index)
+            try:
+                layer = capi.get_layer_by_name(self.ptr, force_bytes(index))
+            except GDALException:
+                raise IndexError('Invalid OGR layer name given: %s.' % index)
         elif isinstance(index, int):
-            if index < 0 or index >= self.layer_count:
-                raise OGRIndexError('index out of range')
-            layer = capi.get_layer(self._ptr, index)
+            if 0 <= index < self.layer_count:
+                layer = capi.get_layer(self._ptr, index)
+            else:
+                raise IndexError('Index out of range when accessing layers in a datasource: %s.' % index)
         else:
             raise TypeError('Invalid index type: %s' % type(index))
         return Layer(layer, self)

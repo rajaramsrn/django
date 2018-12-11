@@ -111,6 +111,28 @@ class StaticTests(SimpleTestCase):
     def test_index(self):
         response = self.client.get('/%s/' % self.prefix)
         self.assertContains(response, 'Index of ./')
+        # Directories have a trailing slash.
+        self.assertIn('subdir/', response.context['file_list'])
+
+    def test_index_subdir(self):
+        response = self.client.get('/%s/subdir/' % self.prefix)
+        self.assertContains(response, 'Index of subdir/')
+        # File with a leading dot (e.g. .hidden) aren't displayed.
+        self.assertEqual(response.context['file_list'], ['visible'])
+
+    @override_settings(TEMPLATES=[{
+        'BACKEND': 'django.template.backends.django.DjangoTemplates',
+        'OPTIONS': {
+            'loaders': [
+                ('django.template.loaders.locmem.Loader', {
+                    'static/directory_index.html': 'Test index',
+                }),
+            ],
+        },
+    }])
+    def test_index_custom_template(self):
+        response = self.client.get('/%s/' % self.prefix)
+        self.assertEqual(response.content, b'Test index')
 
 
 class StaticHelperTest(StaticTests):
@@ -127,7 +149,7 @@ class StaticHelperTest(StaticTests):
         urls.urlpatterns = self._old_views_urlpatterns
 
     def test_prefix(self):
-        self.assertEqual(static('test')[0].regex.pattern, '^test(?P<path>.*)$')
+        self.assertEqual(static('test')[0].pattern.regex.pattern, '^test(?P<path>.*)$')
 
     @override_settings(DEBUG=False)
     def test_debug_off(self):
@@ -139,8 +161,9 @@ class StaticHelperTest(StaticTests):
             static('')
 
     def test_special_prefix(self):
-        """No URLs are served if prefix contains '://'."""
-        self.assertEqual(static('http://'), [])
+        """No URLs are served if prefix contains a netloc part."""
+        self.assertEqual(static('http://example.org'), [])
+        self.assertEqual(static('//example.org'), [])
 
 
 class StaticUtilsTests(unittest.TestCase):

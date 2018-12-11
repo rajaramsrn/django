@@ -351,7 +351,7 @@ applications. This generic name was kept for backwards-compatibility.
 
 * ``'file_charset'``: the charset used to read template files on disk.
 
-  It defaults to the value of :setting:`FILE_CHARSET`.
+  It defaults to ``'utf-8'``.
 
 * ``'libraries'``: A dictionary of labels and dotted Python paths of template
   tag modules to register with the template engine. This can be used to add
@@ -383,7 +383,7 @@ applications. This generic name was kept for backwards-compatibility.
 
 Requires Jinja2_ to be installed:
 
-.. code-block:: console
+.. console::
 
     $ pip install Jinja2
 
@@ -441,10 +441,6 @@ adds defaults that differ from Jinja2's for a few options:
     Unless all of these conditions are met, passing a function to the template is
     simpler and more in line with the design of Jinja2.
 
-.. versionadded:: 1.11
-
-    The ``'context_processors'`` option was added.
-
 The default configuration is purposefully kept to a minimum. If a template is
 rendered with a request (e.g. when using :py:func:`~django.shortcuts.render`),
 the ``Jinja2`` backend adds the globals ``request``, ``csrf_input``, and
@@ -455,7 +451,7 @@ environment.
 
 For example, you can create ``myproject/jinja2.py`` with this content::
 
-    from django.contrib.staticfiles.storage import staticfiles_storage
+    from django.templatetags.static import static
     from django.urls import reverse
 
     from jinja2 import Environment
@@ -464,7 +460,7 @@ For example, you can create ``myproject/jinja2.py`` with this content::
     def environment(**options):
         env = Environment(**options)
         env.globals.update({
-            'static': staticfiles_storage.url,
+            'static': static,
             'url': reverse,
         })
         return env
@@ -531,7 +527,7 @@ fictional ``foobar`` template library::
                 raise TemplateSyntaxError(exc.args)
 
 
-    class Template(object):
+    class Template:
 
         def __init__(self, template):
             self.template = template
@@ -831,4 +827,4 @@ Implementing a custom context processor is as simple as defining a function.
 
 .. _Jinja2: http://jinja.pocoo.org/
 .. _DEP 182: https://github.com/django/deps/blob/master/final/0182-multiple-template-engines.rst
-.. _Django Debug Toolbar: https://github.com/django-debug-toolbar/django-debug-toolbar
+.. _Django Debug Toolbar: https://github.com/jazzband/django-debug-toolbar

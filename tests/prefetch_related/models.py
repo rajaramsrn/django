@@ -9,8 +9,6 @@ from django.db.models.query import ModelIterable, QuerySet
 from django.utils.functional import cached_property
 
 
-# Basic tests
-
 class Author(models.Model):
     name = models.CharField(max_length=50, unique=True)
     first_book = models.ForeignKey('Book', models.CASCADE, related_name='first_time_authors')
@@ -67,7 +65,12 @@ class BookWithYear(Book):
 
 
 class Bio(models.Model):
-    author = models.OneToOneField(Author, models.CASCADE)
+    author = models.OneToOneField(
+        Author,
+        models.CASCADE,
+        primary_key=True,
+        to_field='name',
+    )
     books = models.ManyToManyField(Book, blank=True)
 
 
@@ -83,7 +86,8 @@ class Reader(models.Model):
 
 
 class BookReview(models.Model):
-    book = models.ForeignKey(BookWithYear, models.CASCADE)
+    # Intentionally does not have a related name.
+    book = models.ForeignKey(BookWithYear, models.CASCADE, null=True)
     notes = models.TextField(null=True, blank=True)
 
 

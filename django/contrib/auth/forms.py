@@ -22,6 +22,7 @@ UserModel = get_user_model()
 
 class ReadOnlyPasswordHashWidget(forms.Widget):
     template_name = 'auth/widgets/read_only_password_hash.html'
+    read_only = True
 
     def get_context(self, name, value, attrs):
         context = super().get_context(name, value, attrs)
@@ -100,9 +101,18 @@ class UserCreationForm(forms.ModelForm):
                 self.error_messages['password_mismatch'],
                 code='password_mismatch',
             )
-        self.instance.username = self.cleaned_data.get('username')
-        password_validation.validate_password(self.cleaned_data.get('password2'), self.instance)
         return password2
+
+    def _post_clean(self):
+        super()._post_clean()
+        # Validate the password after self.instance is updated with form data
+        # by super().
+        password = self.cleaned_data.get('password2')
+        if password:
+            try:
+                password_validation.validate_password(password, self.instance)
+            except forms.ValidationError as error:
+                self.add_error('password2', error)
 
     def save(self, commit=True):
         user = super().save(commit=False)
@@ -118,7 +128,7 @@ class UserChangeForm(forms.ModelForm):
         help_text=_(
             "Raw passwords are not stored, so there is no way to see this "
             "user's password, but you can change the password using "
-            "<a href=\"../password/\">this form</a>."
+            "<a href=\"{}\">this form</a>."
         ),
     )
 
@@ -129,15 +139,18 @@ class UserChangeForm(forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        f = self.fields.get('user_permissions')
-        if f is not None:
-            f.queryset = f.queryset.select_related('content_type')
+        password = self.fields.get('password')
+        if password:
+            password.help_text = password.help_text.format('../password/')
+        user_permissions = self.fields.get('user_permissions')
+        if user_permissions:
+            user_permissions.queryset = user_permissions.queryset.select_related('content_type')
 
     def clean_password(self):
         # Regardless of what the user provides, return the initial value.
         # This is done here, rather than on the field, because the
         # field does not have access to the initial value
-        return self.initial["password"]
+        return self.initial.get('password')
 
 
 class AuthenticationForm(forms.Form):
@@ -145,10 +158,7 @@ class AuthenticationForm(forms.Form):
     Base class for authenticating users. Extend this to get a form that accepts
     username/password logins.
     """
-    username = UsernameField(
-        max_length=254,
-        widget=forms.TextInput(attrs={'autofocus': True}),
-    )
+    username = UsernameField(widget=forms.TextInput(attrs={'autofocus': True}))
     password = forms.CharField(
         label=_("Password"),
         strip=False,
@@ -172,8 +182,9 @@ class AuthenticationForm(forms.Form):
         self.user_cache = None
         super().__init__(*args, **kwargs)
 
-        # Set the label for the "username" field.
+        # Set the max length and label for the "username" field.
         self.username_field = UserModel._meta.get_field(UserModel.USERNAME_FIELD)
+        self.fields['username'].max_length = self.username_field.max_length or 254
         if self.fields['username'].label is None:
             self.fields['username'].label = capfirst(self.username_field.verbose_name)
 
@@ -184,11 +195,7 @@ class AuthenticationForm(forms.Form):
         if username is not None and password:
             self.user_cache = authenticate(self.request, username=username, password=password)
             if self.user_cache is None:
-                raise forms.ValidationError(
-                    self.error_messages['invalid_login'],
-                    code='invalid_login',
-                    params={'username': self.username_field.verbose_name},
-                )
+                raise self.get_invalid_login_error()
             else:
                 self.confirm_login_allowed(self.user_cache)
 
@@ -211,13 +218,15 @@ class AuthenticationForm(forms.Form):
                 code='inactive',
             )
 
-    def get_user_id(self):
-        if self.user_cache:
-            return self.user_cache.id
-        return None
-
     def get_user(self):
         return self.user_cache
+
+    def get_invalid_login_error(self):
+        return forms.ValidationError(
+            self.error_messages['invalid_login'],
+            code='invalid_login',
+            params={'username': self.username_field.verbose_name},
+        )
 
 
 class PasswordResetForm(forms.Form):
@@ -275,13 +284,12 @@ class PasswordResetForm(forms.Form):
                 'email': email,
                 'domain': domain,
                 'site_name': site_name,
-                'uid': urlsafe_base64_encode(force_bytes(user.pk)).decode(),
+                'uid': urlsafe_base64_encode(force_bytes(user.pk)),
                 'user': user,
                 'token': token_generator.make_token(user),
                 'protocol': 'https' if use_https else 'http',
+                **(extra_email_context or {}),
             }
-            if extra_email_context is not None:
-                context.update(extra_email_context)
             self.send_mail(
                 subject_template_name, email_template_name, context, from_email,
                 email, html_email_template_name=html_email_template_name,
@@ -337,9 +345,10 @@ class PasswordChangeForm(SetPasswordForm):
     A form that lets a user change their password by entering their old
     password.
     """
-    error_messages = dict(SetPasswordForm.error_messages, **{
+    error_messages = {
+        **SetPasswordForm.error_messages,
         'password_incorrect': _("Your old password was entered incorrectly. Please enter it again."),
-    })
+    }
     old_password = forms.CharField(
         label=_("Old password"),
         strip=False,
@@ -409,7 +418,7 @@ class AdminPasswordChangeForm(forms.Form):
     @property
     def changed_data(self):
         data = super().changed_data
-        for name in self.fields.keys():
+        for name in self.fields:
             if name not in data:
                 return []
         return ['password']

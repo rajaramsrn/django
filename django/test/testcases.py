@@ -9,7 +9,9 @@ from contextlib import contextmanager
 from copy import copy
 from functools import wraps
 from unittest.util import safe_repr
-from urllib.parse import unquote, urljoin, urlparse, urlsplit
+from urllib.parse import (
+    parse_qsl, unquote, urlencode, urljoin, urlparse, urlsplit, urlunparse,
+)
 from urllib.request import url2pathname
 
 from django.apps import apps
@@ -34,7 +36,6 @@ from django.test.utils import (
     override_settings,
 )
 from django.utils.decorators import classproperty
-from django.utils.encoding import force_text
 from django.views.static import serve
 
 __all__ = ('TestCase', 'TransactionTestCase',
@@ -78,7 +79,7 @@ class _AssertNumQueriesContext(CaptureQueriesContext):
             "%d queries executed, %d expected\nCaptured queries were:\n%s" % (
                 executed, self.num,
                 '\n'.join(
-                    query['sql'] for query in self.captured_queries
+                    '%d. %s' % (i, query['sql']) for i, query in enumerate(self.captured_queries, start=1)
                 )
             )
         )
@@ -114,11 +115,12 @@ class _AssertTemplateUsedContext:
 
         if not self.test():
             message = self.message()
-            if len(self.rendered_templates) == 0:
-                message += ' No template was rendered.'
-            else:
+            if self.rendered_templates:
                 message += ' Following templates were rendered: %s' % (
-                    ', '.join(self.rendered_template_names))
+                    ', '.join(self.rendered_template_names)
+                )
+            else:
+                message += ' No template was rendered.'
             self.test_case.fail(message)
 
 
@@ -245,9 +247,9 @@ class SimpleTestCase(unittest.TestCase):
         Assert that a response redirected to a specific URL and that the
         redirect URL can be loaded.
 
-        Won't work for external links since it uses TestClient to do a request
-        (use fetch_redirect_response=False to check such links without fetching
-        them).
+        Won't work for external links since it uses the test client to do a
+        request (use fetch_redirect_response=False to check such links without
+        fetching them).
         """
         if msg_prefix:
             msg_prefix += ": "
@@ -255,7 +257,7 @@ class SimpleTestCase(unittest.TestCase):
         if hasattr(response, 'redirect_chain'):
             # The request was a followed redirect
             self.assertTrue(
-                len(response.redirect_chain) > 0,
+                response.redirect_chain,
                 msg_prefix + "Response didn't redirect as expected: Response code was %d (expected %d)"
                 % (response.status_code, status_code)
             )
@@ -313,9 +315,28 @@ class SimpleTestCase(unittest.TestCase):
                     % (path, redirect_response.status_code, target_status_code)
                 )
 
-        self.assertEqual(
+        self.assertURLEqual(
             url, expected_url,
             msg_prefix + "Response redirected to '%s', expected '%s'" % (url, expected_url)
+        )
+
+    def assertURLEqual(self, url1, url2, msg_prefix=''):
+        """
+        Assert that two URLs are the same, ignoring the order of query string
+        parameters except for parameters with the same name.
+
+        For example, /path/?x=1&y=2 is equal to /path/?y=2&x=1, but
+        /path/?a=1&a=2 isn't equal to /path/?a=2&a=1.
+        """
+        def normalize(url):
+            """Sort the URL's query string parameters."""
+            scheme, netloc, path, params, query, fragment = urlparse(url)
+            query_parts = sorted(parse_qsl(query))
+            return urlunparse((scheme, netloc, path, params, urlencode(query_parts), fragment))
+
+        self.assertEqual(
+            normalize(url1), normalize(url2),
+            msg_prefix + "Expected '%s' to equal '%s'." % (url1, url2)
         )
 
     def _assert_contains(self, response, text, status_code, msg_prefix, html):
@@ -338,7 +359,7 @@ class SimpleTestCase(unittest.TestCase):
         else:
             content = response.content
         if not isinstance(text, bytes) or html:
-            text = force_text(text, encoding=response.charset)
+            text = str(text)
             content = content.decode(response.charset)
             text_repr = "'%s'" % text
         else:
@@ -429,7 +450,7 @@ class SimpleTestCase(unittest.TestCase):
                         msg_prefix + "The form '%s' in context %d does not"
                         " contain the non-field error '%s'"
                         " (actual errors: %s)" %
-                        (form, i, err, non_field_errors)
+                        (form, i, err, non_field_errors or 'none')
                     )
         if not found_form:
             self.fail(msg_prefix + "The form '%s' was not used to render the response" % form)
@@ -488,7 +509,7 @@ class SimpleTestCase(unittest.TestCase):
                 elif form_index is not None:
                     non_field_errors = context[formset].forms[form_index].non_field_errors()
                     self.assertFalse(
-                        len(non_field_errors) == 0,
+                        not non_field_errors,
                         msg_prefix + "The formset '%s', form %d in context %d "
                         "does not contain any non-field errors." % (formset, form_index, i)
                     )
@@ -501,7 +522,7 @@ class SimpleTestCase(unittest.TestCase):
                 else:
                     non_form_errors = context[formset].non_form_errors()
                     self.assertFalse(
-                        len(non_form_errors) == 0,
+                        not non_form_errors,
                         msg_prefix + "The formset '%s' in context %d does not "
                         "contain any non-form errors." % (formset, i)
                     )
@@ -585,14 +606,26 @@ class SimpleTestCase(unittest.TestCase):
         )
 
     @contextmanager
-    def _assert_raises_message_cm(self, expected_exception, expected_message):
-        with self.assertRaises(expected_exception) as cm:
+    def _assert_raises_or_warns_cm(self, func, cm_attr, expected_exception, expected_message):
+        with func(expected_exception) as cm:
             yield cm
-        self.assertIn(expected_message, str(cm.exception))
+        self.assertIn(expected_message, str(getattr(cm, cm_attr)))
+
+    def _assertFooMessage(self, func, cm_attr, expected_exception, expected_message, *args, **kwargs):
+        callable_obj = None
+        if args:
+            callable_obj, *args = args
+        cm = self._assert_raises_or_warns_cm(func, cm_attr, expected_exception, expected_message)
+        # Assertion used in context manager fashion.
+        if callable_obj is None:
+            return cm
+        # Assertion was passed a callable.
+        with cm:
+            callable_obj(*args, **kwargs)
 
     def assertRaisesMessage(self, expected_exception, expected_message, *args, **kwargs):
         """
-        Assert that expected_message is found in the the message of a raised
+        Assert that expected_message is found in the message of a raised
         exception.
 
         Args:
@@ -601,18 +634,20 @@ class SimpleTestCase(unittest.TestCase):
             args: Function to be called and extra positional args.
             kwargs: Extra kwargs.
         """
-        callable_obj = None
-        if len(args):
-            callable_obj = args[0]
-            args = args[1:]
+        return self._assertFooMessage(
+            self.assertRaises, 'exception', expected_exception, expected_message,
+            *args, **kwargs
+        )
 
-        cm = self._assert_raises_message_cm(expected_exception, expected_message)
-        # Assertion used in context manager fashion.
-        if callable_obj is None:
-            return cm
-        # Assertion was passed a callable.
-        with cm:
-            callable_obj(*args, **kwargs)
+    def assertWarnsMessage(self, expected_warning, expected_message, *args, **kwargs):
+        """
+        Same as assertRaisesMessage but for assertWarns() instead of
+        assertRaises().
+        """
+        return self._assertFooMessage(
+            self.assertWarns, 'warning', expected_warning, expected_message,
+            *args, **kwargs
+        )
 
     def assertFieldOutput(self, fieldclass, valid, invalid, field_args=None,
                           field_kwargs=None, empty_value=''):
@@ -634,7 +669,7 @@ class SimpleTestCase(unittest.TestCase):
         if field_kwargs is None:
             field_kwargs = {}
         required = fieldclass(*field_args, **field_kwargs)
-        optional = fieldclass(*field_args, **dict(field_kwargs, required=False))
+        optional = fieldclass(*field_args, **{**field_kwargs, 'required': False})
         # test valid inputs
         for input, output in valid.items():
             self.assertEqual(required.clean(input), output)
@@ -649,7 +684,7 @@ class SimpleTestCase(unittest.TestCase):
                 optional.clean(input)
             self.assertEqual(context_manager.exception.messages, errors)
         # test required inputs
-        error_required = [force_text(required.error_messages['required'])]
+        error_required = [required.error_messages['required']]
         for e in required.empty_values:
             with self.assertRaises(ValidationError) as context_manager:
                 required.clean(e)
@@ -708,7 +743,7 @@ class SimpleTestCase(unittest.TestCase):
         """
         try:
             data = json.loads(raw)
-        except ValueError:
+        except json.JSONDecodeError:
             self.fail("First argument is not valid JSON: %r" % raw)
         if isinstance(expected_data, str):
             try:
@@ -725,12 +760,12 @@ class SimpleTestCase(unittest.TestCase):
         """
         try:
             data = json.loads(raw)
-        except ValueError:
+        except json.JSONDecodeError:
             self.fail("First argument is not valid JSON: %r" % raw)
         if isinstance(expected_data, str):
             try:
                 expected_data = json.loads(expected_data)
-            except ValueError:
+            except json.JSONDecodeError:
                 self.fail("Second argument is not valid JSON: %r" % expected_data)
         self.assertNotEqual(data, expected_data, msg=msg)
 
@@ -827,6 +862,11 @@ class TransactionTestCase(SimpleTestCase):
                     enter=False,
                 )
             raise
+        # Clear the queries_log so that it's less likely to overflow (a single
+        # test probably won't execute 9K queries). If queries_log overflows,
+        # then assertNumQueries() doesn't work.
+        for db_name in self._databases_names(include_mirrors=False):
+            connections[db_name].queries_log.clear()
 
     @classmethod
     def _databases_names(cls, include_mirrors=True):
@@ -847,9 +887,9 @@ class TransactionTestCase(SimpleTestCase):
                 no_style(), conn.introspection.sequence_list())
             if sql_list:
                 with transaction.atomic(using=db_name):
-                    cursor = conn.cursor()
-                    for sql in sql_list:
-                        cursor.execute(sql)
+                    with conn.cursor() as cursor:
+                        for sql in sql_list:
+                            cursor.execute(sql)
 
     def _fixture_setup(self):
         for db_name in self._databases_names(include_mirrors=False):
@@ -857,8 +897,7 @@ class TransactionTestCase(SimpleTestCase):
             if self.reset_sequences:
                 self._reset_sequences(db_name)
 
-            # If we need to provide replica initial data from migrated apps,
-            # then do so.
+            # Provide replica initial data from migrated apps, if needed.
             if self.serialized_rollback and hasattr(connections[db_name], "_test_serialized_contents"):
                 if self.available_apps is not None:
                     apps.unset_available_apps()
@@ -988,15 +1027,11 @@ class TestCase(TransactionTestCase):
 
         if cls.fixtures:
             for db_name in cls._databases_names(include_mirrors=False):
-                    try:
-                        call_command('loaddata', *cls.fixtures, **{
-                            'verbosity': 0,
-                            'commit': False,
-                            'database': db_name,
-                        })
-                    except Exception:
-                        cls._rollback_atomics(cls.cls_atomics)
-                        raise
+                try:
+                    call_command('loaddata', *cls.fixtures, **{'verbosity': 0, 'database': db_name})
+                except Exception:
+                    cls._rollback_atomics(cls.cls_atomics)
+                    raise
         try:
             cls.setUpTestData()
         except Exception:
@@ -1054,7 +1089,7 @@ class CheckCondition:
         self.conditions = conditions
 
     def add_condition(self, condition, reason):
-        return self.__class__(*self.conditions + ((condition, reason),))
+        return self.__class__(*self.conditions, (condition, reason))
 
     def __get__(self, instance, cls=None):
         # Trigger access for all bases.
@@ -1201,9 +1236,9 @@ class _MediaFilesHandler(FSFilesHandler):
 class LiveServerThread(threading.Thread):
     """Thread for running a live http server while the tests are running."""
 
-    def __init__(self, host, static_handler, connections_override=None):
+    def __init__(self, host, static_handler, connections_override=None, port=0):
         self.host = host
-        self.port = None
+        self.port = port
         self.is_ready = threading.Event()
         self.error = None
         self.static_handler = static_handler
@@ -1223,8 +1258,10 @@ class LiveServerThread(threading.Thread):
         try:
             # Create the handler for serving static and media files
             handler = self.static_handler(_MediaFilesHandler(WSGIHandler()))
-            self.httpd = self._create_server(0)
-            self.port = self.httpd.server_address[1]
+            self.httpd = self._create_server()
+            # If binding to port zero, assign the port allocated by the OS.
+            if self.port == 0:
+                self.port = self.httpd.server_address[1]
             self.httpd.set_app(handler)
             self.is_ready.set()
             self.httpd.serve_forever()
@@ -1234,8 +1271,8 @@ class LiveServerThread(threading.Thread):
         finally:
             connections.close_all()
 
-    def _create_server(self, port):
-        return ThreadedWSGIServer((self.host, port), QuietWSGIRequestHandler, allow_reuse_address=False)
+    def _create_server(self):
+        return ThreadedWSGIServer((self.host, self.port), QuietWSGIRequestHandler, allow_reuse_address=False)
 
     def terminate(self):
         if hasattr(self, 'httpd'):
@@ -1257,12 +1294,17 @@ class LiveServerTestCase(TransactionTestCase):
     thread can see the changes.
     """
     host = 'localhost'
+    port = 0
     server_thread_class = LiveServerThread
     static_handler = _StaticFilesHandler
 
     @classproperty
     def live_server_url(cls):
         return 'http://%s:%s' % (cls.host, cls.server_thread.port)
+
+    @classproperty
+    def allowed_host(cls):
+        return cls.host
 
     @classmethod
     def setUpClass(cls):
@@ -1277,7 +1319,7 @@ class LiveServerTestCase(TransactionTestCase):
                 connections_override[conn.alias] = conn
 
         cls._live_server_modified_settings = modify_settings(
-            ALLOWED_HOSTS={'append': cls.host},
+            ALLOWED_HOSTS={'append': cls.allowed_host},
         )
         cls._live_server_modified_settings.enable()
         cls.server_thread = cls._create_server_thread(connections_override)
@@ -1298,6 +1340,7 @@ class LiveServerTestCase(TransactionTestCase):
             cls.host,
             cls.static_handler,
             connections_override=connections_override,
+            port=cls.port,
         )
 
     @classmethod

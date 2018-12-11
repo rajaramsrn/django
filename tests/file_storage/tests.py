@@ -10,7 +10,7 @@ from io import StringIO
 from urllib.request import urlopen
 
 from django.core.cache import cache
-from django.core.exceptions import SuspiciousFileOperation, SuspiciousOperation
+from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.base import ContentFile, File
 from django.core.files.storage import FileSystemStorage, get_storage_class
 from django.core.files.uploadedfile import (
@@ -66,7 +66,7 @@ class FileSystemStorageTests(unittest.TestCase):
     def test_deconstruction(self):
         path, args, kwargs = temp_storage.deconstruct()
         self.assertEqual(path, "django.core.files.storage.FileSystemStorage")
-        self.assertEqual(args, tuple())
+        self.assertEqual(args, ())
         self.assertEqual(kwargs, {'location': temp_storage_location})
 
         kwargs_orig = {
@@ -384,9 +384,9 @@ class FileStorageTests(SimpleTestCase):
         File storage prevents directory traversal (files can only be accessed if
         they're below the storage location).
         """
-        with self.assertRaises(SuspiciousOperation):
+        with self.assertRaises(SuspiciousFileOperation):
             self.storage.exists('..')
-        with self.assertRaises(SuspiciousOperation):
+        with self.assertRaises(SuspiciousFileOperation):
             self.storage.exists('/etc/passwd')
 
     def test_file_storage_preserves_filename_case(self):
@@ -415,9 +415,9 @@ class FileStorageTests(SimpleTestCase):
                 real_makedirs(path)
             elif path == os.path.join(self.temp_dir, 'raced'):
                 real_makedirs(path)
-                raise FileNotFoundError()
-            elif path == os.path.join(self.temp_dir, 'error'):
                 raise FileExistsError()
+            elif path == os.path.join(self.temp_dir, 'error'):
+                raise PermissionError()
             else:
                 self.fail('unexpected argument %r' % path)
 
@@ -432,8 +432,8 @@ class FileStorageTests(SimpleTestCase):
             with self.storage.open('raced/test.file') as f:
                 self.assertEqual(f.read(), b'saved with race')
 
-            # Exceptions aside from FileNotFoundError are raised.
-            with self.assertRaises(FileExistsError):
+            # Exceptions aside from FileExistsError are raised.
+            with self.assertRaises(PermissionError):
                 self.storage.save('error/test.file', ContentFile('not saved'))
         finally:
             os.makedirs = real_makedirs
@@ -544,8 +544,7 @@ class CustomStorage(FileSystemStorage):
         """
         Append numbers to duplicate files rather than underscores, like Trac.
         """
-        parts = name.split('.')
-        basename, ext = parts[0], parts[1:]
+        basename, *ext = name.split('.')
         number = 2
         while self.exists(name):
             name = '.'.join([basename, str(number)] + ext)
@@ -564,6 +563,47 @@ class CustomStorageTests(FileStorageTests):
         self.assertEqual(second, 'custom_storage.2')
         self.storage.delete(first)
         self.storage.delete(second)
+
+
+class OverwritingStorage(FileSystemStorage):
+    """
+    Overwrite existing files instead of appending a suffix to generate an
+    unused name.
+    """
+    # Mask out O_EXCL so os.open() doesn't raise OSError if the file exists.
+    OS_OPEN_FLAGS = FileSystemStorage.OS_OPEN_FLAGS & ~os.O_EXCL
+
+    def get_available_name(self, name, max_length=None):
+        """Override the effort to find an used name."""
+        return name
+
+
+class OverwritingStorageTests(FileStorageTests):
+    storage_class = OverwritingStorage
+
+    def test_save_overwrite_behavior(self):
+        """Saving to same file name twice overwrites the first file."""
+        name = 'test.file'
+        self.assertFalse(self.storage.exists(name))
+        content_1 = b'content one'
+        content_2 = b'second content'
+        f_1 = ContentFile(content_1)
+        f_2 = ContentFile(content_2)
+        stored_name_1 = self.storage.save(name, f_1)
+        try:
+            self.assertEqual(stored_name_1, name)
+            self.assertTrue(self.storage.exists(name))
+            self.assertTrue(os.path.exists(os.path.join(self.temp_dir, name)))
+            with self.storage.open(name) as fp:
+                self.assertEqual(fp.read(), content_1)
+            stored_name_2 = self.storage.save(name, f_2)
+            self.assertEqual(stored_name_2, name)
+            self.assertTrue(self.storage.exists(name))
+            self.assertTrue(os.path.exists(os.path.join(self.temp_dir, name)))
+            with self.storage.open(name) as fp:
+                self.assertEqual(fp.read(), content_2)
+        finally:
+            self.storage.delete(name)
 
 
 class DiscardingFalseContentStorage(FileSystemStorage):
@@ -781,7 +821,7 @@ class FileFieldStorageTests(TestCase):
         # Create sample file
         temp_storage.save('tests/example.txt', ContentFile('some content'))
 
-        # Load it as python file object
+        # Load it as Python file object
         with open(temp_storage.path('tests/example.txt')) as file_obj:
             # Save it using storage and read its content
             temp_storage.save('tests/file_obj', file_obj)
@@ -943,9 +983,10 @@ class FileLikeObjectTestCase(LiveServerTestCase):
     def tearDown(self):
         shutil.rmtree(self.temp_dir)
 
-    def test_urllib2_urlopen(self):
+    def test_urllib_request_urlopen(self):
         """
-        Test the File storage API with a file like object coming from urllib2.urlopen()
+        Test the File storage API with a file-like object coming from
+        urllib.request.urlopen().
         """
         file_like_object = urlopen(self.live_server_url + '/')
         f = File(file_like_object)

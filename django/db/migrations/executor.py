@@ -86,6 +86,10 @@ class MigrationExecutor:
         Django first needs to create all project states before a migration is
         (un)applied and in a second step run all the database operations.
         """
+        # The django_migrations table must be present to record applied
+        # migrations.
+        self.recorder.ensure_schema()
+
         if plan is None:
             plan = self.migration_plan(targets)
         # Create the forwards plan Django would follow on an empty database
@@ -226,6 +230,7 @@ class MigrationExecutor:
 
     def apply_migration(self, state, migration, fake=False, fake_initial=False):
         """Run a migration forwards."""
+        migration_recorded = False
         if self.progress_callback:
             self.progress_callback("apply_start", migration, fake)
         if not fake:
@@ -238,16 +243,22 @@ class MigrationExecutor:
                 # Alright, do it normally
                 with self.connection.schema_editor(atomic=migration.atomic) as schema_editor:
                     state = migration.apply(state, schema_editor)
+                    self.record_migration(migration)
+                    migration_recorded = True
+        if not migration_recorded:
+            self.record_migration(migration)
+        # Report progress
+        if self.progress_callback:
+            self.progress_callback("apply_success", migration, fake)
+        return state
+
+    def record_migration(self, migration):
         # For replacement migrations, record individual statuses
         if migration.replaces:
             for app_label, name in migration.replaces:
                 self.recorder.record_applied(app_label, name)
         else:
             self.recorder.record_applied(migration.app_label, migration.name)
-        # Report progress
-        if self.progress_callback:
-            self.progress_callback("apply_success", migration, fake)
-        return state
 
     def unapply_migration(self, state, migration, fake=False):
         """Run a migration backwards."""
@@ -318,7 +329,8 @@ class MigrationExecutor:
         apps = after_state.apps
         found_create_model_migration = False
         found_add_field_migration = False
-        existing_table_names = self.connection.introspection.table_names(self.connection.cursor())
+        with self.connection.cursor() as cursor:
+            existing_table_names = self.connection.introspection.table_names(cursor)
         # Make sure all create model and add field operations are done
         for operation in migration.operations:
             if isinstance(operation, migrations.CreateModel):

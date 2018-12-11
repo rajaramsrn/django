@@ -4,7 +4,9 @@ from itertools import takewhile
 
 from django.apps import apps
 from django.conf import settings
-from django.core.management.base import BaseCommand, CommandError
+from django.core.management.base import (
+    BaseCommand, CommandError, no_translations,
+)
 from django.db import DEFAULT_DB_ALIAS, connections, router
 from django.db.migrations import Migration
 from django.db.migrations.autodetector import MigrationAutodetector
@@ -27,15 +29,15 @@ class Command(BaseCommand):
             help='Specify the app label(s) to create migrations for.',
         )
         parser.add_argument(
-            '--dry-run', action='store_true', dest='dry_run',
+            '--dry-run', action='store_true',
             help="Just show what migrations would be made; don't actually write them.",
         )
         parser.add_argument(
-            '--merge', action='store_true', dest='merge',
+            '--merge', action='store_true',
             help="Enable fixing of migration conflicts.",
         )
         parser.add_argument(
-            '--empty', action='store_true', dest='empty',
+            '--empty', action='store_true',
             help="Create an empty migration.",
         )
         parser.add_argument(
@@ -43,7 +45,7 @@ class Command(BaseCommand):
             help='Tells Django to NOT prompt the user for input of any kind.',
         )
         parser.add_argument(
-            '-n', '--name', action='store', dest='name', default=None,
+            '-n', '--name',
             help="Use this name for migration file(s).",
         )
         parser.add_argument(
@@ -51,6 +53,7 @@ class Command(BaseCommand):
             help='Exit with a non-zero status if model changes are missing migrations.',
         )
 
+    @no_translations
     def handle(self, *app_labels, **options):
         self.verbosity = options['verbosity']
         self.interactive = options['interactive']
@@ -58,19 +61,20 @@ class Command(BaseCommand):
         self.merge = options['merge']
         self.empty = options['empty']
         self.migration_name = options['name']
+        if self.migration_name and not self.migration_name.isidentifier():
+            raise CommandError('The migration name must be a valid Python identifier.')
         check_changes = options['check_changes']
 
         # Make sure the app they asked for exists
         app_labels = set(app_labels)
-        bad_app_labels = set()
+        has_bad_labels = False
         for app_label in app_labels:
             try:
                 apps.get_app_config(app_label)
-            except LookupError:
-                bad_app_labels.add(app_label)
-        if bad_app_labels:
-            for app_label in bad_app_labels:
-                self.stderr.write("App '%s' could not be found. Is it in INSTALLED_APPS?" % app_label)
+            except LookupError as err:
+                self.stderr.write(str(err))
+                has_bad_labels = True
+        if has_bad_labels:
             sys.exit(2)
 
         # Load the current graph state. Pass in None for the connection so
@@ -78,7 +82,7 @@ class Command(BaseCommand):
         loader = MigrationLoader(None, ignore_no_migrations=True)
 
         # Raise an error if any migrations are applied before their dependencies.
-        consistency_check_labels = set(config.label for config in apps.get_app_configs())
+        consistency_check_labels = {config.label for config in apps.get_app_configs()}
         # Non-default databases are only checked if database routers used.
         aliases_to_check = connections if settings.DATABASE_ROUTERS else [DEFAULT_DB_ALIAS]
         for alias in sorted(aliases_to_check):
@@ -162,10 +166,11 @@ class Command(BaseCommand):
         if not changes:
             # No changes? Tell them.
             if self.verbosity >= 1:
-                if len(app_labels) == 1:
-                    self.stdout.write("No changes detected in app '%s'" % app_labels.pop())
-                elif len(app_labels) > 1:
-                    self.stdout.write("No changes detected in apps '%s'" % ("', '".join(app_labels)))
+                if app_labels:
+                    if len(app_labels) == 1:
+                        self.stdout.write("No changes detected in app '%s'" % app_labels.pop())
+                    else:
+                        self.stdout.write("No changes detected in apps '%s'" % ("', '".join(app_labels)))
                 else:
                     self.stdout.write("No changes detected")
         else:
@@ -244,7 +249,7 @@ class Command(BaseCommand):
             def all_items_equal(seq):
                 return all(item == seq[0] for item in seq[1:])
 
-            merge_migrations_generations = zip(*[m.ancestry for m in merge_migrations])
+            merge_migrations_generations = zip(*(m.ancestry for m in merge_migrations))
             common_ancestor_count = sum(1 for common_ancestor_generation
                                         in takewhile(all_items_equal, merge_migrations_generations))
             if not common_ancestor_count:
@@ -275,7 +280,7 @@ class Command(BaseCommand):
                     biggest_number = max(x for x in numbers if x is not None)
                 except ValueError:
                     biggest_number = 1
-                subclass = type("Migration", (Migration, ), {
+                subclass = type("Migration", (Migration,), {
                     "dependencies": [(app_label, migration.name) for migration in merge_migrations],
                 })
                 migration_name = "%04i_%s" % (

@@ -14,7 +14,7 @@ from django.test import (
 from .models import Reporter
 
 
-@skipUnless(connection.features.uses_savepoints, "'atomic' requires transactions and savepoints.")
+@skipUnlessDBFeature('uses_savepoints')
 class AtomicTests(TransactionTestCase):
     """
     Tests for the atomic decorator and context manager.
@@ -228,10 +228,7 @@ class AtomicInsideTransactionTests(AtomicTests):
         self.atomic.__exit__(*sys.exc_info())
 
 
-@skipIf(
-    connection.features.autocommits_when_autocommit_is_off,
-    "This test requires a non-autocommit mode that doesn't autocommit."
-)
+@skipIfDBFeature('autocommits_when_autocommit_is_off')
 class AtomicWithoutAutocommitTests(AtomicTests):
     """All basic tests for atomic should also pass when autocommit is turned off."""
 
@@ -245,7 +242,7 @@ class AtomicWithoutAutocommitTests(AtomicTests):
         transaction.set_autocommit(True)
 
 
-@skipUnless(connection.features.uses_savepoints, "'atomic' requires transactions and savepoints.")
+@skipUnlessDBFeature('uses_savepoints')
 class AtomicMergeTests(TransactionTestCase):
     """Test merging transactions with savepoint=False."""
 
@@ -295,24 +292,25 @@ class AtomicMergeTests(TransactionTestCase):
         self.assertQuerysetEqual(Reporter.objects.all(), ['<Reporter: Tintin>'])
 
 
-@skipUnless(connection.features.uses_savepoints, "'atomic' requires transactions and savepoints.")
+@skipUnlessDBFeature('uses_savepoints')
 class AtomicErrorsTests(TransactionTestCase):
 
     available_apps = ['transactions']
+    forbidden_atomic_msg = "This is forbidden when an 'atomic' block is active."
 
     def test_atomic_prevents_setting_autocommit(self):
         autocommit = transaction.get_autocommit()
         with transaction.atomic():
-            with self.assertRaises(transaction.TransactionManagementError):
+            with self.assertRaisesMessage(transaction.TransactionManagementError, self.forbidden_atomic_msg):
                 transaction.set_autocommit(not autocommit)
         # Make sure autocommit wasn't changed.
         self.assertEqual(connection.autocommit, autocommit)
 
     def test_atomic_prevents_calling_transaction_methods(self):
         with transaction.atomic():
-            with self.assertRaises(transaction.TransactionManagementError):
+            with self.assertRaisesMessage(transaction.TransactionManagementError, self.forbidden_atomic_msg):
                 transaction.commit()
-            with self.assertRaises(transaction.TransactionManagementError):
+            with self.assertRaisesMessage(transaction.TransactionManagementError, self.forbidden_atomic_msg):
                 transaction.rollback()
 
     def test_atomic_prevents_queries_in_broken_transaction(self):
@@ -322,7 +320,11 @@ class AtomicErrorsTests(TransactionTestCase):
             with self.assertRaises(IntegrityError):
                 r2.save(force_insert=True)
             # The transaction is marked as needing rollback.
-            with self.assertRaises(transaction.TransactionManagementError):
+            msg = (
+                "An error occurred in the current transaction. You can't "
+                "execute queries until the end of the 'atomic' block."
+            )
+            with self.assertRaisesMessage(transaction.TransactionManagementError, msg):
                 r2.save(force_update=True)
         self.assertEqual(Reporter.objects.get(pk=r1.pk).last_name, "Haddock")
 
@@ -397,7 +399,7 @@ class AtomicMySQLTests(TransactionTestCase):
 
 class AtomicMiscTests(TransactionTestCase):
 
-    available_apps = []
+    available_apps = ['transactions']
 
     def test_wrap_callable_instance(self):
         """#20028 -- Atomic must support wrapping callable instances."""
@@ -431,11 +433,54 @@ class AtomicMiscTests(TransactionTestCase):
                 # This is expected to fail because the savepoint no longer exists.
                 connection.savepoint_rollback(sid)
 
+    def test_mark_for_rollback_on_error_in_transaction(self):
+        with transaction.atomic(savepoint=False):
 
-@skipIf(
-    connection.features.autocommits_when_autocommit_is_off,
-    "This test requires a non-autocommit mode that doesn't autocommit."
-)
+            # Swallow the intentional error raised.
+            with self.assertRaisesMessage(Exception, "Oops"):
+
+                # Wrap in `mark_for_rollback_on_error` to check if the transaction is marked broken.
+                with transaction.mark_for_rollback_on_error():
+
+                    # Ensure that we are still in a good state.
+                    self.assertFalse(transaction.get_rollback())
+
+                    raise Exception("Oops")
+
+                # Ensure that `mark_for_rollback_on_error` marked the transaction as broken …
+                self.assertTrue(transaction.get_rollback())
+
+            # … and further queries fail.
+            msg = "You can't execute queries until the end of the 'atomic' block."
+            with self.assertRaisesMessage(transaction.TransactionManagementError, msg):
+                Reporter.objects.create()
+
+        # Transaction errors are reset at the end of an transaction, so this should just work.
+        Reporter.objects.create()
+
+    def test_mark_for_rollback_on_error_in_autocommit(self):
+        self.assertTrue(transaction.get_autocommit())
+
+        # Swallow the intentional error raised.
+        with self.assertRaisesMessage(Exception, "Oops"):
+
+            # Wrap in `mark_for_rollback_on_error` to check if the transaction is marked broken.
+            with transaction.mark_for_rollback_on_error():
+
+                # Ensure that we are still in a good state.
+                self.assertFalse(transaction.get_connection().needs_rollback)
+
+                raise Exception("Oops")
+
+            # Ensure that `mark_for_rollback_on_error` did not mark the transaction
+            # as broken, since we are in autocommit mode …
+            self.assertFalse(transaction.get_connection().needs_rollback)
+
+        # … and further queries work nicely.
+        Reporter.objects.create()
+
+
+@skipIfDBFeature('autocommits_when_autocommit_is_off')
 class NonAutocommitTests(TransactionTestCase):
 
     available_apps = []

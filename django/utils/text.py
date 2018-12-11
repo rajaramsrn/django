@@ -4,24 +4,20 @@ import unicodedata
 from gzip import GzipFile
 from io import BytesIO
 
-from django.utils.encoding import force_text
-from django.utils.functional import (
-    SimpleLazyObject, keep_lazy, keep_lazy_text, lazy,
-)
-from django.utils.safestring import SafeText, mark_safe
+from django.utils.functional import SimpleLazyObject, keep_lazy_text, lazy
 from django.utils.translation import gettext as _, gettext_lazy, pgettext
 
 
 @keep_lazy_text
 def capfirst(x):
     """Capitalize the first letter of a string."""
-    return x and force_text(x)[0].upper() + force_text(x)[1:]
+    return x and str(x)[0].upper() + str(x)[1:]
 
 
 # Set up regular expressions
 re_words = re.compile(r'<.*?>|((?:\w[-\w]*|&.*?;)+)', re.S)
 re_chars = re.compile(r'<.*?>|(.)', re.S)
-re_tag = re.compile(r'<(/)?([^ ]+?)(?:(\s*/)| .*?)?>', re.S)
+re_tag = re.compile(r'<(/)?(\S+?)(?:(\s*/)|\s.*?)?>', re.S)
 re_newlines = re.compile(r'\r\n|\r')  # Used in normalize_newlines
 re_camel_case = re.compile(r'(((?<=[a-z])[A-Z])|([A-Z](?![A-Z]|$)))')
 
@@ -62,13 +58,13 @@ class Truncator(SimpleLazyObject):
     An object used to truncate text, either by characters or words.
     """
     def __init__(self, text):
-        super().__init__(lambda: force_text(text))
+        super().__init__(lambda: str(text))
 
     def add_truncation_text(self, text, truncate=None):
         if truncate is None:
             truncate = pgettext(
                 'String to return when truncating text',
-                '%(truncated_text)s...')
+                '%(truncated_text)s…')
         if '%(truncated_text)s' in truncate:
             return truncate % {'truncated_text': text}
         # The truncation text didn't contain the %(truncated_text)s string
@@ -85,8 +81,7 @@ class Truncator(SimpleLazyObject):
         of characters.
 
         `truncate` specifies what should be used to notify that the string has
-        been truncated, defaulting to a translatable string of an ellipsis
-        (...).
+        been truncated, defaulting to a translatable string of an ellipsis.
         """
         self._setup()
         length = int(num)
@@ -127,7 +122,7 @@ class Truncator(SimpleLazyObject):
         """
         Truncate a string after a certain number of words. `truncate` specifies
         what should be used to notify that the string has been truncated,
-        defaulting to ellipsis (...).
+        defaulting to ellipsis.
         """
         self._setup()
         length = int(num)
@@ -230,7 +225,7 @@ def get_valid_filename(s):
     >>> get_valid_filename("john's portrait in 2004.jpg")
     'johns_portrait_in_2004.jpg'
     """
-    s = force_text(s).strip().replace(' ', '_')
+    s = str(s).strip().replace(' ', '_')
     return re.sub(r'(?u)[^-\w.]', '', s)
 
 
@@ -248,21 +243,20 @@ def get_text_list(list_, last_word=gettext_lazy('or')):
     >>> get_text_list([])
     ''
     """
-    if len(list_) == 0:
+    if not list_:
         return ''
     if len(list_) == 1:
-        return force_text(list_[0])
+        return str(list_[0])
     return '%s %s %s' % (
         # Translators: This string is used as a separator between list elements
-        _(', ').join(force_text(i) for i in list_[:-1]),
-        force_text(last_word), force_text(list_[-1]))
+        _(', ').join(str(i) for i in list_[:-1]), str(last_word), str(list_[-1])
+    )
 
 
 @keep_lazy_text
 def normalize_newlines(text):
     """Normalize CRLF and CR newlines to just LF."""
-    text = force_text(text)
-    return re_newlines.sub('\n', text)
+    return re_newlines.sub('\n', str(text))
 
 
 @keep_lazy_text
@@ -286,25 +280,12 @@ def compress_string(s):
     return zbuf.getvalue()
 
 
-class StreamingBuffer:
-    def __init__(self):
-        self.vals = []
-
-    def write(self, val):
-        self.vals.append(val)
-
+class StreamingBuffer(BytesIO):
     def read(self):
-        if not self.vals:
-            return b''
-        ret = b''.join(self.vals)
-        self.vals = []
+        ret = self.getvalue()
+        self.seek(0)
+        self.truncate()
         return ret
-
-    def flush(self):
-        return
-
-    def close(self):
-        return
 
 
 # Like compress_string, but for iterators of strings.
@@ -349,8 +330,7 @@ def smart_split(text):
     >>> list(smart_split(r'A "\"funky\" style" test.'))
     ['A', '"\\"funky\\" style"', 'test.']
     """
-    text = force_text(text)
-    for bit in smart_split_re.finditer(text):
+    for bit in smart_split_re.finditer(str(text)):
         yield bit.group(0)
 
 
@@ -378,7 +358,7 @@ _entity_re = re.compile(r"&(#?[xX]?(?:[0-9a-fA-F]+|\w{1,8}));")
 
 @keep_lazy_text
 def unescape_entities(text):
-    return _entity_re.sub(_replace_entity, force_text(text))
+    return _entity_re.sub(_replace_entity, str(text))
 
 
 @keep_lazy_text
@@ -402,25 +382,25 @@ def unescape_string_literal(s):
     return s[1:-1].replace(r'\%s' % quote, quote).replace(r'\\', '\\')
 
 
-@keep_lazy(str, SafeText)
+@keep_lazy_text
 def slugify(value, allow_unicode=False):
     """
     Convert to ASCII if 'allow_unicode' is False. Convert spaces to hyphens.
     Remove characters that aren't alphanumerics, underscores, or hyphens.
     Convert to lowercase. Also strip leading and trailing whitespace.
     """
-    value = force_text(value)
+    value = str(value)
     if allow_unicode:
         value = unicodedata.normalize('NFKC', value)
     else:
         value = unicodedata.normalize('NFKD', value).encode('ascii', 'ignore').decode('ascii')
     value = re.sub(r'[^\w\s-]', '', value).strip().lower()
-    return mark_safe(re.sub(r'[-\s]+', '-', value))
+    return re.sub(r'[-\s]+', '-', value)
 
 
 def camel_case_to_spaces(value):
     """
-    Split CamelCase and convert to lower case. Strip surrounding whitespace.
+    Split CamelCase and convert to lowercase. Strip surrounding whitespace.
     """
     return re_camel_case.sub(r' \1', value).strip().lower()
 

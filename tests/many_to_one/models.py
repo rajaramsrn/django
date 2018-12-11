@@ -44,8 +44,8 @@ class District(models.Model):
 
 
 # If ticket #1578 ever slips back in, these models will not be able to be
-# created (the field names being lower-cased versions of their opposite
-# classes is important here).
+# created (the field names being lowercased versions of their opposite classes
+# is important here).
 class First(models.Model):
     second = models.IntegerField()
 
@@ -71,7 +71,7 @@ class Child(models.Model):
 
 
 class ToFieldChild(models.Model):
-    parent = models.ForeignKey(Parent, models.CASCADE, to_field='name')
+    parent = models.ForeignKey(Parent, models.CASCADE, to_field='name', related_name='to_field_children')
 
 
 # Multiple paths to the same model (#7110, #7125)

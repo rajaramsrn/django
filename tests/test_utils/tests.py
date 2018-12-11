@@ -1,6 +1,6 @@
 import os
-import sys
 import unittest
+import warnings
 from io import StringIO
 from unittest import mock
 
@@ -14,12 +14,13 @@ from django.forms import EmailField, IntegerField
 from django.http import HttpResponse
 from django.template.loader import render_to_string
 from django.test import (
-    SimpleTestCase, TestCase, skipIfDBFeature, skipUnlessDBFeature,
+    SimpleTestCase, TestCase, TransactionTestCase, skipIfDBFeature,
+    skipUnlessDBFeature,
 )
 from django.test.html import HTMLParseError, parse_html
 from django.test.utils import (
-    CaptureQueriesContext, isolate_apps, override_settings,
-    setup_test_environment,
+    CaptureQueriesContext, TestContextDecorator, isolate_apps,
+    override_settings, setup_test_environment,
 )
 from django.urls import NoReverseMatch, reverse
 
@@ -157,10 +158,37 @@ class AssertNumQueriesTests(TestCase):
         self.assertNumQueries(2, test_func)
 
 
+@unittest.skipUnless(
+    connection.vendor != 'sqlite' or not connection.is_in_memory_db(),
+    'For SQLite in-memory tests, closing the connection destroys the database.'
+)
+class AssertNumQueriesUponConnectionTests(TransactionTestCase):
+    available_apps = []
+
+    def test_ignores_connection_configuration_queries(self):
+        real_ensure_connection = connection.ensure_connection
+        connection.close()
+
+        def make_configuration_query():
+            is_opening_connection = connection.connection is None
+            real_ensure_connection()
+
+            if is_opening_connection:
+                # Avoid infinite recursion. Creating a cursor calls
+                # ensure_connection() which is currently mocked by this method.
+                connection.cursor().execute('SELECT 1' + connection.features.bare_select_suffix)
+
+        ensure_connection = 'django.db.backends.base.base.BaseDatabaseWrapper.ensure_connection'
+        with mock.patch(ensure_connection, side_effect=make_configuration_query):
+            with self.assertNumQueries(1):
+                list(Car.objects.all())
+
+
 class AssertQuerysetEqualTests(TestCase):
-    def setUp(self):
-        self.p1 = Person.objects.create(name='p1')
-        self.p2 = Person.objects.create(name='p2')
+    @classmethod
+    def setUpTestData(cls):
+        cls.p1 = Person.objects.create(name='p1')
+        cls.p2 = Person.objects.create(name='p2')
 
     def test_ordered(self):
         self.assertQuerysetEqual(
@@ -185,7 +213,8 @@ class AssertQuerysetEqualTests(TestCase):
     def test_undefined_order(self):
         # Using an unordered queryset with more than one ordered value
         # is an error.
-        with self.assertRaises(ValueError):
+        msg = 'Trying to compare non-ordered queryset against more than one ordered values'
+        with self.assertRaisesMessage(ValueError, msg):
             self.assertQuerysetEqual(
                 Person.objects.all(),
                 [repr(self.p1), repr(self.p2)]
@@ -227,8 +256,9 @@ class AssertQuerysetEqualTests(TestCase):
 @override_settings(ROOT_URLCONF='test_utils.urls')
 class CaptureQueriesContextManagerTests(TestCase):
 
-    def setUp(self):
-        self.person_pk = str(Person.objects.create(name='test').pk)
+    @classmethod
+    def setUpTestData(cls):
+        cls.person_pk = str(Person.objects.create(name='test').pk)
 
     def test_simple(self):
         with CaptureQueriesContext(connection) as captured_queries:
@@ -296,8 +326,10 @@ class AssertNumQueriesContextManagerTests(TestCase):
         with self.assertRaises(AssertionError) as exc_info:
             with self.assertNumQueries(2):
                 Person.objects.count()
-        self.assertIn("1 queries executed, 2 expected", str(exc_info.exception))
-        self.assertIn("Captured queries were", str(exc_info.exception))
+        exc_lines = str(exc_info.exception).split('\n')
+        self.assertEqual(exc_lines[0], '1 != 2 : 1 queries executed, 2 expected')
+        self.assertEqual(exc_lines[1], 'Captured queries were:')
+        self.assertTrue(exc_lines[2].startswith('1.'))  # queries are numbered
 
         with self.assertRaises(TypeError):
             with self.assertNumQueries(4000):
@@ -386,23 +418,29 @@ class AssertTemplateUsedContextManagerTests(SimpleTestCase):
             self.assertTemplateUsed(response, 'template_used/base.html')
 
     def test_failure(self):
-        with self.assertRaises(TypeError):
+        msg = 'response and/or template_name argument must be provided'
+        with self.assertRaisesMessage(TypeError, msg):
             with self.assertTemplateUsed():
                 pass
 
-        with self.assertRaises(AssertionError):
+        msg = 'No templates used to render the response'
+        with self.assertRaisesMessage(AssertionError, msg):
             with self.assertTemplateUsed(''):
                 pass
 
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesMessage(AssertionError, msg):
             with self.assertTemplateUsed(''):
                 render_to_string('template_used/base.html')
 
-        with self.assertRaises(AssertionError):
+        with self.assertRaisesMessage(AssertionError, msg):
             with self.assertTemplateUsed(template_name=''):
                 pass
 
-        with self.assertRaises(AssertionError):
+        msg = (
+            'template_used/base.html was not rendered. Following '
+            'templates were rendered: template_used/alternative.html'
+        )
+        with self.assertRaisesMessage(AssertionError, msg):
             with self.assertTemplateUsed('template_used/base.html'):
                 render_to_string('template_used/alternative.html')
 
@@ -648,9 +686,6 @@ class HTMLEqualTests(SimpleTestCase):
         error_msg = (
             "First argument is not valid HTML:\n"
             "('Unexpected end tag `div` (Line 1, Column 6)', (1, 6))"
-        ) if sys.version_info >= (3, 5) else (
-            "First argument is not valid HTML:\n"
-            "Unexpected end tag `div` (Line 1, Column 6), at line 1, column 7"
         )
         with self.assertRaisesMessage(AssertionError, error_msg):
             self.assertHTMLEqual('< div></ div>', '<div></div>')
@@ -659,15 +694,15 @@ class HTMLEqualTests(SimpleTestCase):
 
     def test_contains_html(self):
         response = HttpResponse('''<body>
-        This is a form: <form action="" method="get">
+        This is a form: <form method="get">
             <input type="text" name="Hello" />
         </form></body>''')
 
         self.assertNotContains(response, "<input name='Hello' type='text'>")
-        self.assertContains(response, '<form action="" method="get">')
+        self.assertContains(response, '<form method="get">')
 
         self.assertContains(response, "<input name='Hello' type='text'>", html=True)
-        self.assertNotContains(response, '<form action="" method="get">', html=True)
+        self.assertNotContains(response, '<form method="get">', html=True)
 
         invalid_response = HttpResponse('''<body <bad>>''')
 
@@ -832,6 +867,30 @@ class AssertRaisesMsgTest(SimpleTestCase):
             func1()
 
 
+class AssertWarnsMessageTests(SimpleTestCase):
+
+    def test_context_manager(self):
+        with self.assertWarnsMessage(UserWarning, 'Expected message'):
+            warnings.warn('Expected message', UserWarning)
+
+    def test_context_manager_failure(self):
+        msg = "Expected message' not found in 'Unexpected message'"
+        with self.assertRaisesMessage(AssertionError, msg):
+            with self.assertWarnsMessage(UserWarning, 'Expected message'):
+                warnings.warn('Unexpected message', UserWarning)
+
+    def test_callable(self):
+        def func():
+            warnings.warn('Expected message', UserWarning)
+        self.assertWarnsMessage(UserWarning, 'Expected message', func)
+
+    def test_special_re_chars(self):
+        def func1():
+            warnings.warn('[.*x+]y?', UserWarning)
+        with self.assertWarnsMessage(UserWarning, '[.*x+]y?'):
+            func1()
+
+
 class AssertFieldOutputTests(SimpleTestCase):
 
     def test_assert_field_output(self):
@@ -852,6 +911,54 @@ class AssertFieldOutputTests(SimpleTestCase):
                 'required': 'This is really required.',
             }
         self.assertFieldOutput(MyCustomField, {}, {}, empty_value=None)
+
+
+class AssertURLEqualTests(SimpleTestCase):
+    def test_equal(self):
+        valid_tests = (
+            ('http://example.com/?', 'http://example.com/'),
+            ('http://example.com/?x=1&', 'http://example.com/?x=1'),
+            ('http://example.com/?x=1&y=2', 'http://example.com/?y=2&x=1'),
+            ('http://example.com/?x=1&y=2', 'http://example.com/?y=2&x=1'),
+            ('http://example.com/?x=1&y=2&a=1&a=2', 'http://example.com/?a=1&a=2&y=2&x=1'),
+            ('/path/to/?x=1&y=2&z=3', '/path/to/?z=3&y=2&x=1'),
+            ('?x=1&y=2&z=3', '?z=3&y=2&x=1'),
+        )
+        for url1, url2 in valid_tests:
+            with self.subTest(url=url1):
+                self.assertURLEqual(url1, url2)
+
+    def test_not_equal(self):
+        invalid_tests = (
+            # Protocol must be the same.
+            ('http://example.com/', 'https://example.com/'),
+            ('http://example.com/?x=1&x=2', 'https://example.com/?x=2&x=1'),
+            ('http://example.com/?x=1&y=bar&x=2', 'https://example.com/?y=bar&x=2&x=1'),
+            # Parameters of the same name must be in the same order.
+            ('/path/to?a=1&a=2', '/path/to/?a=2&a=1')
+        )
+        for url1, url2 in invalid_tests:
+            with self.subTest(url=url1), self.assertRaises(AssertionError):
+                self.assertURLEqual(url1, url2)
+
+    def test_message(self):
+        msg = (
+            "Expected 'http://example.com/?x=1&x=2' to equal "
+            "'https://example.com/?x=2&x=1'"
+        )
+        with self.assertRaisesMessage(AssertionError, msg):
+            self.assertURLEqual('http://example.com/?x=1&x=2', 'https://example.com/?x=2&x=1')
+
+    def test_msg_prefix(self):
+        msg = (
+            "Prefix: Expected 'http://example.com/?x=1&x=2' to equal "
+            "'https://example.com/?x=2&x=1'"
+        )
+        with self.assertRaisesMessage(AssertionError, msg):
+            self.assertURLEqual(
+                'http://example.com/?x=1&x=2', 'https://example.com/?x=2&x=1',
+                msg_prefix='Prefix: ',
+            )
 
 
 class FirstUrls:
@@ -987,7 +1094,7 @@ class OverrideSettingsTests(SimpleTestCase):
         Overriding the STATICFILES_STORAGE setting should be reflected in
         the value of django.contrib.staticfiles.storage.staticfiles_storage.
         """
-        new_class = 'CachedStaticFilesStorage'
+        new_class = 'ManifestStaticFilesStorage'
         new_storage = 'django.contrib.staticfiles.storage.' + new_class
         with self.settings(STATICFILES_STORAGE=new_storage):
             self.assertEqual(staticfiles_storage.__class__.__name__, new_class)
@@ -1116,3 +1223,28 @@ class IsolatedAppsTests(SimpleTestCase):
         self.assertEqual(MethodDecoration._meta.apps, method_apps)
         self.assertEqual(ContextManager._meta.apps, context_apps)
         self.assertEqual(NestedContextManager._meta.apps, nested_context_apps)
+
+
+class DoNothingDecorator(TestContextDecorator):
+    def enable(self):
+        pass
+
+    def disable(self):
+        pass
+
+
+class TestContextDecoratorTests(SimpleTestCase):
+
+    @mock.patch.object(DoNothingDecorator, 'disable')
+    def test_exception_in_setup(self, mock_disable):
+        """An exception is setUp() is reraised after disable() is called."""
+        class ExceptionInSetUp(unittest.TestCase):
+            def setUp(self):
+                raise NotImplementedError('reraised')
+
+        decorator = DoNothingDecorator()
+        decorated_test_class = decorator.__call__(ExceptionInSetUp)()
+        self.assertFalse(mock_disable.called)
+        with self.assertRaisesMessage(NotImplementedError, 'reraised'):
+            decorated_test_class.setUp()
+        self.assertTrue(mock_disable.called)

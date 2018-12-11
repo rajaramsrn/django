@@ -13,7 +13,7 @@ The custom version of NamedTemporaryFile doesn't support the same keyword
 arguments available in tempfile.NamedTemporaryFile.
 
 1: https://mail.python.org/pipermail/python-list/2005-December/336957.html
-2: http://bugs.python.org/issue14243
+2: https://bugs.python.org/issue14243
 """
 
 import os
@@ -54,7 +54,7 @@ if os.name == 'nt':
                     pass
                 try:
                     self.unlink(self.name)
-                except (OSError):
+                except OSError:
                     pass
 
         def __del__(self):

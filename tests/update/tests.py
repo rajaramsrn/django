@@ -6,12 +6,13 @@ from .models import A, B, Bar, D, DataPoint, Foo, RelatedPoint
 
 
 class SimpleTest(TestCase):
-    def setUp(self):
-        self.a1 = A.objects.create()
-        self.a2 = A.objects.create()
+    @classmethod
+    def setUpTestData(cls):
+        cls.a1 = A.objects.create()
+        cls.a2 = A.objects.create()
         for x in range(20):
-            B.objects.create(a=self.a1)
-            D.objects.create(a=self.a1)
+            B.objects.create(a=cls.a1)
+            D.objects.create(a=cls.a1)
 
     def test_nonempty_update(self):
         """
@@ -62,11 +63,12 @@ class SimpleTest(TestCase):
 
 class AdvancedTests(TestCase):
 
-    def setUp(self):
-        self.d0 = DataPoint.objects.create(name="d0", value="apple")
-        self.d2 = DataPoint.objects.create(name="d2", value="banana")
-        self.d3 = DataPoint.objects.create(name="d3", value="banana")
-        self.r1 = RelatedPoint.objects.create(name="r1", data=self.d3)
+    @classmethod
+    def setUpTestData(cls):
+        cls.d0 = DataPoint.objects.create(name="d0", value="apple")
+        cls.d2 = DataPoint.objects.create(name="d2", value="banana")
+        cls.d3 = DataPoint.objects.create(name="d3", value="banana")
+        cls.r1 = RelatedPoint.objects.create(name="r1", data=cls.d3)
 
     def test_update(self):
         """
@@ -83,8 +85,7 @@ class AdvancedTests(TestCase):
         """
         We can update multiple objects at once.
         """
-        resp = DataPoint.objects.filter(value="banana").update(
-            value="pineapple")
+        resp = DataPoint.objects.filter(value='banana').update(value='pineapple')
         self.assertEqual(resp, 2)
         self.assertEqual(DataPoint.objects.get(name="d2").value, 'pineapple')
 
@@ -123,7 +124,8 @@ class AdvancedTests(TestCase):
         We do not support update on already sliced query sets.
         """
         method = DataPoint.objects.all()[:2].update
-        with self.assertRaises(AssertionError):
+        msg = 'Cannot update a query once a slice has been taken.'
+        with self.assertRaisesMessage(AssertionError, msg):
             method(another_value='another thing')
 
     def test_update_respects_to_field(self):
@@ -138,6 +140,15 @@ class AdvancedTests(TestCase):
         self.assertEqual(bar_qs[0].foo_id, a_foo.target)
         bar_qs.update(foo=b_foo)
         self.assertEqual(bar_qs[0].foo_id, b_foo.target)
+
+    def test_update_m2m_field(self):
+        msg = (
+            'Cannot update model field '
+            '<django.db.models.fields.related.ManyToManyField: m2m_foo> '
+            '(only non-relations and foreign keys permitted).'
+        )
+        with self.assertRaisesMessage(FieldError, msg):
+            Bar.objects.update(m2m_foo='whatever')
 
     def test_update_annotated_queryset(self):
         """

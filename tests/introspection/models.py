@@ -24,6 +24,7 @@ class Reporter(models.Model):
     facebook_user_id = models.BigIntegerField(null=True)
     raw_data = models.BinaryField(null=True)
     small_int = models.SmallIntegerField()
+    interval = models.DurationField()
 
     class Meta:
         unique_together = ('first_name', 'last_name')
@@ -47,6 +48,7 @@ class Article(models.Model):
         ordering = ('headline',)
         index_together = [
             ["headline", "pub_date"],
+            ['headline', 'response_to', 'pub_date', 'reporter'],
         ]
 
 

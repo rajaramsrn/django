@@ -1,16 +1,22 @@
+from http import HTTPStatus
+
 from django.core.exceptions import SuspiciousOperation
 from django.db import connection, transaction
 from django.http import HttpResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 
-try:
-    from http import HTTPStatus
-except ImportError:  # Python < 3.5
-    pass
-
 
 def regular(request):
     return HttpResponse(b"regular content")
+
+
+def no_response(request):
+    pass
+
+
+class NoResponse:
+    def __call__(self, request):
+        pass
 
 
 def streaming(request):
